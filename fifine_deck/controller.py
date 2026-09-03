@@ -1136,6 +1136,27 @@ class DeckController:
     def prev_profile(self) -> None:
         self._rotate_profile(-1)
 
+    def obs_connection(self) -> tuple[str, int, str]:
+        """Host, port, and password for OBS WebSocket (Options → OBS settings)."""
+        cfg = self.config
+        host = getattr(cfg, "obs_host", "127.0.0.1") or "127.0.0.1"
+        try:
+            port = int(getattr(cfg, "obs_port", 4455) or 4455)
+        except (TypeError, ValueError):
+            port = 4455
+        password = ""
+        sid = getattr(cfg, "obs_secret_id", "") or ""
+        if sid:
+            from . import secret_store
+            password = secret_store.get(sid) or ""
+            if not password:
+                log.warning(
+                    "OBS password secret %s unavailable (keyring locked or "
+                    "empty); trying cleartext fallback", sid)
+        if not password:
+            password = getattr(cfg, "obs_password", "") or ""
+        return host, port, password
+
     def sleep_screen(self) -> None:
         with self._lock:
             if self.device:
