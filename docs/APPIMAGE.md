@@ -50,10 +50,12 @@ and session integration, and a stale bundled copy would be worse than the host's
 ## Building it
 
 ```bash
-./packaging/build-appimage.sh [version]        # version defaults to debian/changelog
+./packaging/build-appimage.sh [version]        # version defaults to YYYY.MM.DD.HHMM
 ```
 
-Produces `dist/fifine-control-deck-<version>-x86_64.AppImage`, about 57 MB.
+Produces `dist/fifine-control-deck-<version>-x86_64.AppImage` (about 57–63 MB)
+and refreshes the stable symlink `dist/fifine-control-deck-x86_64.AppImage`.
+Pass an explicit version (e.g. from `debian/changelog`) for release builds.
 
 The build starts from [python-appimage](https://github.com/niess/python-appimage)'s
 manylinux CPython 3.12 — a relocatable interpreter that already works inside an
