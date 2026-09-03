@@ -4,6 +4,10 @@
 #   ./packaging/build-appimage.sh [version]
 #
 # Produces: dist/fifine-control-deck-<version>-x86_64.AppImage
+# Also refreshes: dist/fifine-control-deck-x86_64.AppImage (stable name).
+#
+# Version defaults to a local timestamp YYYY.MM.DD.HHMM (e.g. 2026.09.03.1154).
+# Pass an explicit version to override (release builds, CI).
 #
 # WHY this exists: every other path we ship builds a .deb, so Fedora, Arch,
 # openSUSE and SteamOS users have no install route at all. An AppImage runs on
@@ -26,10 +30,12 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$HERE"
 
 if [ -z "$VERSION" ]; then
-    # Same source of truth as install.sh: the packaged version, not a guess.
-    VERSION="$(sed -n '1s/.*(\([^)]*\)).*/\1/p' debian/changelog | sed 's/ppa[0-9]*$//')"
+    # Local / iterative builds: stamp the wall clock so each AppImage is
+    # uniquely named without bumping debian/changelog. Override with $1 for
+    # release builds that should match the packaged semver.
+    VERSION="$(date +%Y.%m.%d.%H%M)"
 fi
-[ -n "$VERSION" ] || { echo "FATAL: no version given and none in debian/changelog" >&2; exit 1; }
+[ -n "$VERSION" ] || { echo "FATAL: empty version" >&2; exit 1; }
 
 PY_VER="3.12"
 PY_FULL="3.12.13"    # a reproducible PIN; auto-falls-back if upstream rotates it
@@ -151,9 +157,13 @@ chmod +x "$APPDIR/AppRun"
 echo ">> packing"
 ARCH=x86_64 "$CACHE/appimagetool" --appimage-extract-and-run "$APPDIR" "$OUT" >/dev/null 2>&1
 chmod +x "$OUT"
+# Stable filename for scripts / desktop entries that do not want the stamp.
+STABLE="$HERE/dist/fifine-control-deck-x86_64.AppImage"
+ln -sfn "$(basename "$OUT")" "$STABLE"
 
 echo
 echo "Built: $OUT  ($(du -h "$OUT" | cut -f1))"
+echo "Also:  $STABLE  ->  $(basename "$OUT")"
 echo
 echo "Run it:  $OUT"
 echo
