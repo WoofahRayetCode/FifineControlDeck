@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QGridLayout, QVBoxLayout, QHBoxLayout, QLabel,
     QComboBox, QPushButton, QSlider, QInputDialog, QMessageBox, QDockWidget,
     QSystemTrayIcon, QMenu, QStatusBar, QScrollArea, QFileDialog, QCheckBox,
+    QDialog, QFormLayout, QLineEdit, QSpinBox, QDialogButtonBox,
 )
 
 from .. import rendering, assets
@@ -52,6 +53,9 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("fifine Control Deck")
         self.resize(1000, 620)
+        # Keep a normal minimize button so the window can sit on the taskbar
+        # (distinct from Hide to background, which removes it from the panel).
+        self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, True)
 
         # Let action editors offer a profile dropdown for the "switch profile" action.
         from . import widgets as _widgets
@@ -81,6 +85,7 @@ class MainWindow(QMainWindow):
             lambda i, img, page_id="": self.bridge.monitorImage.emit(i, img, page_id)
 
         self._close_notified = False
+        self.tray = None
         self._build_ui()
         self._build_menu()
         self._build_tray()
@@ -104,16 +109,37 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self):
         m = self.menuBar().addMenu("&Options")
+        minimize_act = QAction("Minimize to taskbar", self)
+        minimize_act.setShortcut("Ctrl+M")
+        minimize_act.setToolTip(
+            "Keep the window on the panel/taskbar (Ctrl+M). "
+            "Distinct from Hide to background.")
+        minimize_act.triggered.connect(self._minimize_to_taskbar)
         hide_act = QAction("Hide to background", self)
         hide_act.setShortcut("Ctrl+W")
+        hide_act.setToolTip(
+            "Hide the window; keys keep working. "
+            "Re-open from the tray or by launching the app again. Quit with Ctrl+Q.")
         hide_act.triggered.connect(self.close)
         show_min = QAction("Show / Raise window", self)
         show_min.triggered.connect(self.show_and_raise)
         quit_act = QAction("Quit", self)
         quit_act.setShortcut("Ctrl+Q")
+        quit_act.setToolTip(
+            "Stop the app completely (keys go inactive). "
+            "Closing the window only hides it.")
         quit_act.triggered.connect(self._quit)
+        m.addAction(minimize_act)
         m.addAction(hide_act)
         m.addAction(show_min)
+        m.addSeparator()
+        folder_act = QAction("Create folder on selected key…", self)
+        folder_act.setShortcut("Ctrl+Shift+F")
+        folder_act.setToolTip(
+            "Turn the selected key into a named folder of shortcuts "
+            "(or the first empty key)")
+        folder_act.triggered.connect(self._create_folder_on_selected)
+        m.addAction(folder_act)
         m.addSeparator()
         export_act = QAction("Export config…", self)
         export_act.triggered.connect(self._export_config)
@@ -127,9 +153,20 @@ class MainWindow(QMainWindow):
         import os as _os
         from ..app import autostart_file
         self.autostart_act = QAction("Start on login (hidden)", self, checkable=True)
+        self.autostart_act.setToolTip(
+            "Launch hidden at login so your keys work immediately. "
+            "Open the window anytime by launching the app again.")
         self.autostart_act.setChecked(_os.path.exists(autostart_file()))
         self.autostart_act.toggled.connect(self._set_autostart)
         m.addAction(self.autostart_act)
+        # Tray: prefer on when a StatusNotifier host exists; persist preference.
+        self.tray_act = QAction("Show in system tray", self, checkable=True)
+        self.tray_act.setToolTip(
+            "Show a tray icon when this desktop provides one "
+            "(close/hide keeps keys active; click the icon to re-open).")
+        self.tray_act.setChecked(bool(self.config.show_tray))
+        self.tray_act.toggled.connect(self._set_show_tray)
+        m.addAction(self.tray_act)
         # Glow-on-press toggle
         self.glow_act = QAction("Flash key on press", self, checkable=True)
         self.glow_act.setChecked(bool(self.config.glow))
@@ -141,11 +178,33 @@ class MainWindow(QMainWindow):
         self.sleep_act.toggled.connect(self._set_sleep_with_screen)
         m.addAction(self.sleep_act)
         m.addSeparator()
+        obs_act = QAction("OBS settings…", self)
+        obs_act.triggered.connect(self._obs_settings)
+        m.addAction(obs_act)
+        m.addSeparator()
         m.addAction(quit_act)
 
     def _set_glow(self, on: bool):
         self.config.glow = bool(on)
         self._queue_save()
+
+    def _set_show_tray(self, on: bool):
+        self.config.show_tray = bool(on)
+        self._queue_save()
+        self._apply_tray()
+        if on and self.tray is None and not self._tray_forced_off():
+            # Preference is on, but this session has no StatusNotifier host
+            # (common on stock GNOME). Keep the preference so a later session
+            # with a tray host picks it up; tell the user why there is no icon.
+            QMessageBox.information(
+                self, "System tray",
+                "This desktop does not expose a system tray "
+                "(StatusNotifier host), so no icon can be shown right now.\n\n"
+                "Closing the window still keeps your keys active in the "
+                "background — launch “fifine Control Deck” again to re-open "
+                "it, or use Minimize to taskbar to keep it on the panel.\n\n"
+                "The preference is saved and will show a tray icon on desktops "
+                "that provide one (e.g. KDE Plasma).")
 
     def _set_sleep_with_screen(self, on: bool):
         self.config.sleep_with_screen = bool(on)
@@ -153,6 +212,97 @@ class MainWindow(QMainWindow):
         if not on:
             # turning it off must not leave the deck stuck dark if it slept
             self.controller.wake_screen()
+
+    def _obs_settings(self):
+        """Edit global OBS WebSocket host/port/password and test the link."""
+        from .. import secret_store, obs_ws
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("OBS settings")
+        form = QFormLayout(dlg)
+        host = QLineEdit(self.config.obs_host or "127.0.0.1")
+        port = QSpinBox()
+        port.setRange(1, 65535)
+        port.setValue(int(self.config.obs_port or 4455))
+        sid = self.config.obs_secret_id or ""
+        initial_pw = ""
+        unreadable = False
+        if sid:
+            initial_pw = secret_store.get(sid) or ""
+            unreadable = not initial_pw
+        if not initial_pw and not unreadable:
+            initial_pw = self.config.obs_password or ""
+        pw = QLineEdit(initial_pw)
+        pw.setEchoMode(QLineEdit.EchoMode.Password)
+        if unreadable:
+            pw.setPlaceholderText("(saved — keyring locked)")
+        form.addRow("Host", host)
+        form.addRow("Port", port)
+        form.addRow("Password", pw)
+        hint = QLabel(
+            "Enable the WebSocket server in OBS under "
+            "<b>Tools → WebSocket Server Settings</b> (OBS 28+). "
+            "Default port is 4455.")
+        hint.setWordWrap(True)
+        form.addRow(hint)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel)
+        test_btn = buttons.addButton(
+            "Test connection", QDialogButtonBox.ButtonRole.ActionRole)
+        form.addRow(buttons)
+
+        def _test():
+            ok, msg = obs_ws.ping(host.text().strip() or "127.0.0.1",
+                                  port.value(), pw.text())
+            if ok:
+                QMessageBox.information(dlg, "OBS connection", msg)
+            else:
+                QMessageBox.warning(dlg, "OBS connection", msg)
+
+        test_btn.clicked.connect(_test)
+        buttons.rejected.connect(dlg.reject)
+
+        def _save():
+            self.config.obs_host = host.text().strip() or "127.0.0.1"
+            self.config.obs_port = int(port.value())
+            text = pw.text()
+            if not text:
+                # Empty field: keep existing binding if keyring was unreadable,
+                # otherwise clear both secret and cleartext.
+                if not (sid and unreadable):
+                    old_sid = self.config.obs_secret_id
+                    self.config.obs_secret_id = ""
+                    self.config.obs_password = ""
+                    if old_sid:
+                        # Drop from owned set so the next save reaps it.
+                        self._owned_secret_ids.discard(old_sid)
+            else:
+                new_sid = sid or secret_store.new_id()
+                if secret_store.store(new_sid, text):
+                    self.config.obs_secret_id = new_sid
+                    self.config.obs_password = ""
+                    self._owned_secret_ids.add(new_sid)
+                elif sid and unreadable is False and self.config.obs_secret_id:
+                    # Transient keyring failure with an existing binding: keep it.
+                    QMessageBox.warning(
+                        dlg, "Password not updated",
+                        "The keyring refused to store the new password, so the "
+                        "previous OBS password is still active.")
+                else:
+                    self.config.obs_secret_id = ""
+                    self.config.obs_password = text
+                    QMessageBox.warning(
+                        dlg, "Password not stored securely",
+                        "No usable keyring was found, so the OBS password will "
+                        "be saved in your configuration file in cleartext.")
+            obs_ws.invalidate()
+            self._queue_save()
+            dlg.accept()
+
+        buttons.accepted.connect(_save)
+        dlg.exec()
 
     def _set_autostart(self, on: bool):
         from ..app import autostart_file, set_autostart
@@ -200,8 +350,12 @@ class MainWindow(QMainWindow):
 
         Walks profiles, pages, folders (recursively) and knobs, including hold
         actions and multi-action steps, because a secret in any one of them ends
-        up in the exported file just the same.
+        up in the exported file just the same. Also covers the top-level OBS
+        WebSocket password when it was stored without a keyring.
         """
+        if getattr(self.config, "obs_password", ""):
+            return True
+
         def step_has(step) -> bool:
             """A multi-action step, which is NOT a bare action dict.
 
@@ -357,8 +511,17 @@ class MainWindow(QMainWindow):
         self.config.glow = imported.glow
         self.config.sleep_with_screen = imported.sleep_with_screen
         self.config.snap_hint_dismissed = imported.snap_hint_dismissed
+        self.config.obs_host = imported.obs_host
+        self.config.obs_port = imported.obs_port
+        self.config.obs_secret_id = imported.obs_secret_id
+        self.config.obs_password = imported.obs_password
         self.config.profiles = imported.profiles
         self.config.active_profile_id = imported.active_profile_id
+        try:
+            from .. import obs_ws
+            obs_ws.invalidate()
+        except Exception:
+            pass
         # reset_nav, not page_index=0: if we were inside a folder, _container
         # still points at a Folder from the profiles we just discarded. It is
         # unreachable from self.config, so every later edit would preview fine,
@@ -366,6 +529,10 @@ class MainWindow(QMainWindow):
         self.controller.reset_nav()
         self.glow_act.setChecked(self.config.glow)
         self.sleep_act.setChecked(self.config.sleep_with_screen)
+        self.tray_act.blockSignals(True)
+        self.tray_act.setChecked(bool(self.config.show_tray))
+        self.tray_act.blockSignals(False)
+        self._apply_tray()
         self.bright.setValue(self.config.brightness)
         self._reload_profiles()
         self._rebuild_grid()
@@ -460,6 +627,12 @@ class MainWindow(QMainWindow):
         self.breadcrumb.setStyleSheet("color:#9a9a9a;")
         crumb.addWidget(self.breadcrumb)
         crumb.addStretch()
+        self.create_folder_btn = QPushButton("Create folder…")
+        self.create_folder_btn.setToolTip(
+            "Turn the selected key into a named folder of shortcuts "
+            "(or the first empty key). Shortcut: Ctrl+Shift+F")
+        self.create_folder_btn.clicked.connect(self._create_folder_on_selected)
+        crumb.addWidget(self.create_folder_btn)
         root.addLayout(crumb)
 
         # key grid, centered on a "device" panel
@@ -530,32 +703,64 @@ class MainWindow(QMainWindow):
             pass
         return False
 
+    @staticmethod
+    def _tray_forced_off() -> bool:
+        """FIFINE_TRAY=0 forces the tray off regardless of config."""
+        import os as _os
+        return _os.environ.get("FIFINE_TRAY") == "0"
+
+    def _tray_wanted(self) -> bool:
+        """Whether this session should show a tray icon.
+
+        Default is on (config.show_tray) whenever a real StatusNotifier host
+        is present. FIFINE_TRAY=0 forces off; FIFINE_TRAY=1 is accepted as an
+        explicit prefer-on but still requires a host (never trap close-to-tray
+        on compositors without a restore path).
+        """
+        import os as _os
+        if self._tray_forced_off():
+            return False
+        prefer = bool(self.config.show_tray) or _os.environ.get("FIFINE_TRAY") == "1"
+        return prefer and self._tray_host_present()
+
     def _build_tray(self):
+        """Initial tray setup at window construction."""
+        self.tray = None
+        self.setWindowIcon(self._app_icon())
+        self._apply_tray()
+
+    def _apply_tray(self):
+        """Create, show, or tear down the tray icon to match preference + host."""
         icon = self._app_icon()
         self.setWindowIcon(icon)
-        # Only create a tray icon when a real host exists; otherwise closing
-        # would hide the window with no way to restore it.
-        self.tray = None
-        # Opt-in: only build a tray when explicitly requested AND a real
-        # StatusNotifier host is on the bus (avoids the close-to-tray trap and
-        # D-Bus warnings on compositors without a tray host).
-        import os as _os
-        if _os.environ.get("FIFINE_TRAY") != "1" or not self._tray_host_present():
+        if not self._tray_wanted():
+            if self.tray is not None:
+                self.tray.hide()
+                self.tray.setContextMenu(None)
+                self.tray.deleteLater()
+                self.tray = None
             return
-        self.tray = QSystemTrayIcon(icon, self)
-        menu = QMenu()
-        show = QAction("Show / Hide", self)
-        show.triggered.connect(self._toggle_visible)
-        quit_a = QAction("Quit", self)
-        quit_a.triggered.connect(self._quit)
-        menu.addAction(show)
-        menu.addSeparator()
-        menu.addAction(quit_a)
-        self.tray.setContextMenu(menu)
-        self.tray.activated.connect(
-            lambda r: self._toggle_visible()
-            if r == QSystemTrayIcon.ActivationReason.Trigger else None)
-        self.tray.setToolTip("fifine Control Deck")
+        if self.tray is None:
+            self.tray = QSystemTrayIcon(icon, self)
+            menu = QMenu()
+            show = QAction("Show window", self)
+            show.triggered.connect(self.show_and_raise)
+            hide = QAction("Hide to background", self)
+            hide.triggered.connect(self.hide)
+            quit_a = QAction("Quit", self)
+            quit_a.triggered.connect(self._quit)
+            menu.addAction(show)
+            menu.addAction(hide)
+            menu.addSeparator()
+            menu.addAction(quit_a)
+            self.tray.setContextMenu(menu)
+            self.tray.activated.connect(
+                lambda r: self._toggle_visible()
+                if r == QSystemTrayIcon.ActivationReason.Trigger else None)
+            self.tray.setToolTip(
+                "fifine Control Deck — click to show/hide; right-click to quit")
+        else:
+            self.tray.setIcon(icon)
         self.tray.show()
 
     def _app_icon(self) -> QIcon:
@@ -581,6 +786,7 @@ class MainWindow(QMainWindow):
             btn.actionDropped.connect(self._on_action_dropped)
             btn.keyMoved.connect(self._on_key_moved)
             btn.openFolder.connect(self._on_open_folder)
+            btn.createFolder.connect(self._on_create_folder_at)
             self.grid.addWidget(btn, r, c)
             self.buttons[idx] = btn
         self._refresh_all_previews()
@@ -886,6 +1092,14 @@ class MainWindow(QMainWindow):
         self._queue_save()
 
     def _on_action_dropped(self, index: int, atype: str):
+        # Open-folder is not a bare action: it owns nested pages. Route through
+        # Create folder… so the user names it (or renames/restores) instead of
+        # silently minting a generic "Folder" with no prompt.
+        if atype == "open_folder":
+            self._on_key_selected(index)
+            self._create_folder_on_selected()
+            return
+
         kc = self._page().key(index)
         # Capture the OLD action's defaults first: an icon/label that still
         # matches them was auto-assigned by a previous drop and should follow
@@ -950,6 +1164,109 @@ class MainWindow(QMainWindow):
             self.controller.enter_folder(kc.folder)
             # (controller fires on_page_changed -> _on_external_page_change resync)
 
+    def _refresh_key_slot(self, idx: int) -> None:
+        """Repaint one key in the grid/editor (and on the deck) after a model edit."""
+        kc = self._page().key(idx)
+        btn = self.buttons.get(idx)
+        if btn is not None:
+            btn.update_preview(kc)
+        if self.controller.connected:
+            self.controller.render_key(idx)
+            self.controller.refresh()
+        self._on_key_selected(idx)
+        self._update_breadcrumb()
+        self._queue_save()
+
+    def _create_folder_on_selected(self):
+        """Turn a key into an Open-folder key, prompting for the folder name.
+
+        Uses the currently selected key when possible; otherwise the first
+        empty key on the page (and selects it so the slot is visible). Confirms
+        before changing a key that already has an action. A dormant folder on
+        the key is restored rather than wiped. An active folder is renamed.
+        """
+        page = self._page()
+        key_count = int(DEVICE_PROFILE.get("key_count", 15) or 15)
+        idx = self.selected_index
+        if idx is None:
+            idx = next((i for i in range(1, key_count + 1)
+                        if page.key(i).is_empty()), None)
+            if idx is None:
+                QMessageBox.information(
+                    self, "Create folder",
+                    "Select a key first, or clear a key so there is an empty "
+                    "slot for the new folder.")
+                return
+            # Show which empty slot will become the folder before the name
+            # dialog, so cancel still leaves a sensible selection.
+            self._on_key_selected(idx)
+
+        kc = page.key(idx)
+        if kc.action.type == "open_folder" and kc.folder is not None:
+            # Already a folder — offer to rename rather than wipe contents.
+            name, ok = QInputDialog.getText(
+                self, "Rename folder", "Folder name:",
+                text=kc.folder.name or kc.label or "Folder")
+            if not ok:
+                return
+            name = " ".join((name or "").split()) or "Folder"
+            kc.folder.name = name
+            kc.label = name
+            kc.icon = kc.icon or assets.library_ref("folder")
+            self._refresh_key_slot(idx)
+            return
+
+        # Dormant folder (action changed away from open_folder): restoring it
+        # keeps nested pages. Confirm when a live press/hold action would be
+        # replaced; a label-only key can become a folder without a prompt.
+        restoring = kc.folder is not None
+        has_live_action = (
+            kc.action.type not in ("none", "open_folder")
+            or kc.hold_action.type != "none")
+        if has_live_action:
+            label = f" (“{kc.label}”)" if kc.label else ""
+            if restoring:
+                prompt = (
+                    f"Key {idx}{label} still has folder contents from before. "
+                    f"Restore it as a folder? Nested keys are kept.")
+            else:
+                prompt = (
+                    f"Key {idx} already has an action{label}. "
+                    f"Replace it with a folder?")
+            if QMessageBox.question(self, "Create folder", prompt) \
+                    != QMessageBox.StandardButton.Yes:
+                return
+
+        default_name = (
+            (kc.folder.name if restoring else "")
+            or (kc.label if kc.action.type == "open_folder" else "")
+            or "Folder")
+        name, ok = QInputDialog.getText(
+            self, "Create folder", "Folder name:", text=default_name)
+        if not ok:
+            return
+        name = " ".join((name or "").split()) or "Folder"
+
+        # Preserve a dormant folder if the user is re-enabling open_folder on
+        # a key that used to be one; otherwise mint a fresh page + Back key.
+        kc.label = name
+        kc.icon = assets.library_ref("folder")
+        kc.bg_color = kc.bg_color if kc.bg_color != "#101020" else "#152035"
+        kc.action = Action("open_folder", {})
+        kc.hold_action = Action()
+        if kc.folder is not None:
+            kc.folder.name = name
+        self._ensure_folder(kc)
+        if kc.folder is not None:
+            kc.folder.name = name
+
+        self._refresh_key_slot(idx)
+        sb = self.statusBar()
+        if sb is not None:
+            sb.showMessage(
+                f"Folder “{name}” on key {idx} — double-click the key to open it",
+                5000)
+
     def _folder_back(self):
         self.controller.go_back()
 
@@ -1005,12 +1322,38 @@ class MainWindow(QMainWindow):
         if self.selected_index is None:
             return
         idx = self.selected_index
-        self._ensure_folder(self._page().key(idx))
-        self.buttons[idx].update_preview(self._page().key(idx))
+        kc = self._page().key(idx)
+        self._ensure_folder(kc)
+        # Breadcrumb / nested navigation use folder.name; keep it aligned with
+        # the label the user edits on an open_folder key. Picking Open folder
+        # from the action dropdown (instead of Create folder…) can leave an
+        # empty label — fill folder defaults so the key is recognizable.
+        if kc.action.type == "open_folder" and kc.folder is not None:
+            filled = False
+            if not (kc.label or "").strip():
+                kc.label = kc.folder.name or "Folder"
+                filled = True
+            if not kc.icon:
+                kc.icon = assets.library_ref("folder")
+                filled = True
+            name = " ".join((kc.label or "").split()) or "Folder"
+            if kc.folder.name != name:
+                kc.folder.name = name
+                self._update_breadcrumb()
+            if filled:
+                # Refresh the panel so Label/Icon match what we just filled;
+                # set_key is re-entrant-safe via its _building guard.
+                self.editor.set_key(kc, idx)
+        self.buttons[idx].update_preview(kc)
         if self.controller.connected:
             self.controller.render_key(idx)
             self.controller.refresh()
         self._queue_save()
+
+    def _on_create_folder_at(self, index: int):
+        """Context-menu Create folder… on a specific key slot."""
+        self._on_key_selected(index)
+        self._create_folder_on_selected()
 
     def _on_brightness(self, v):
         self.controller.set_brightness(v)
@@ -1169,23 +1512,37 @@ class MainWindow(QMainWindow):
     def _queue_save(self):
         self._save_timer.start()
 
+    def _minimize_to_taskbar(self):
+        """Minimize like a normal app so the window stays on the panel/taskbar.
+
+        Distinct from Hide to background, which removes the window entirely
+        until it is re-opened (or shown from the tray / by launching again).
+        """
+        self.showMinimized()
+
     def _toggle_visible(self):
         if self.isVisible():
             self.hide()
         else:
-            self.showNormal()
-            self.raise_()
-            self.activateWindow()
+            self.show_and_raise()
 
     def closeEvent(self, e):
         # Closing never quits: the deck keeps working in the background.
         # A tray (if present) or relaunching the command reopens the window.
+        # (Minimize-to-taskbar is Options → Minimize / the title-bar button.)
         self.hide()
         e.ignore()
+        sb = self.statusBar()
+        if sb is not None:
+            sb.showMessage(
+                "Running in the background — keys stay active. "
+                "Quit with Ctrl+Q.", 6000)
         if self.tray is not None and self.tray.isVisible():
-            self.tray.showMessage("fifine Control Deck",
-                                  "Still running in the tray. Right-click to quit.",
-                                  self._app_icon(), 3000)
+            self.tray.showMessage(
+                "fifine Control Deck",
+                "Still running in the tray. Left-click to show; "
+                "right-click → Quit.",
+                self._app_icon(), 4000)
         elif not self._close_notified:
             self._close_notified = True
             QMessageBox.information(
@@ -1193,7 +1550,11 @@ class MainWindow(QMainWindow):
                 "fifine Control Deck keeps running so your keys stay active.\n\n"
                 "• Re-open this window: launch “fifine Control Deck” again "
                 "(or run 'fifine-control-deck').\n"
-                "• Quit completely: Options → Quit  (Ctrl+Q).")
+                "• Stay on the panel instead: Options → Minimize to taskbar "
+                "(Ctrl+M).\n"
+                "• Quit completely: Options → Quit  (Ctrl+Q).\n\n"
+                "Tip: enable Options → Show in system tray on desktops that "
+                "provide a tray icon.")
 
     def _reap_orphan_secrets(self):
         """Delete keyring secrets the config no longer references.
