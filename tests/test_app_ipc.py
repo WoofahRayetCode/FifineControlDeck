@@ -227,6 +227,8 @@ def test_autostart_exec_is_bundle_aware_and_quoted(monkeypatch):
     line must point at $APPIMAGE; (2) that path must be desktop-entry-quoted or
     a space (or $, ", backtick) in it silently breaks start-on-login."""
     from fifine_deck import app
+    # Isolate from a real ~/.local/bin launcher on the developer machine.
+    monkeypatch.setattr(app, "_user_local_launcher", lambda: None)
     # normal install: plain PATH command
     monkeypatch.delenv("FIFINE_IN_BUNDLE", raising=False)
     monkeypatch.delenv("APPIMAGE", raising=False)
@@ -244,9 +246,24 @@ def test_autostart_exec_doubles_percent(monkeypatch):
     """A literal % in the AppImage path must become %% or the session manager
     parses it as a desktop-entry field code. (wide-audit residual)"""
     from fifine_deck import app
+    monkeypatch.setattr(app, "_user_local_launcher", lambda: None)
     monkeypatch.setenv("FIFINE_IN_BUNDLE", "1")
     monkeypatch.setenv("APPIMAGE", "/opt/100%tools/fifine.AppImage")
     assert app._autostart_exec() == '"/opt/100%%tools/fifine.AppImage" --hidden'
+
+
+def test_autostart_exec_prefers_stable_local_launcher(monkeypatch, tmp_path):
+    """Programs-menu install keeps ~/.local/bin/fifine-control-deck pointed at
+    the current AppImage; prefer that over $APPIMAGE so rebuilds don't break
+    start-on-login."""
+    from fifine_deck import app
+    launcher = tmp_path / "fifine-control-deck"
+    launcher.write_text("#!/bin/sh\n")
+    launcher.chmod(0o755)
+    monkeypatch.setattr(app, "_user_local_launcher", lambda: str(launcher))
+    monkeypatch.setenv("FIFINE_IN_BUNDLE", "1")
+    monkeypatch.setenv("APPIMAGE", "/tmp/stamped-2026.AppImage")
+    assert app._autostart_exec() == f'"{launcher}" --hidden'
 
 
 def test_set_autostart_survives_an_unwritable_target(monkeypatch, tmp_path, capsys):
