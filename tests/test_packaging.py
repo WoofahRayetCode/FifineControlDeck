@@ -324,6 +324,16 @@ def test_appimage_build_script_guards_the_transport_lib():
     assert "libtransport_arm64.so" in src, "the wrong-arch lib is not stripped"
 
 
+def test_appimage_build_defaults_to_a_timestamp_version():
+    """Iterative AppImage builds stamp YYYY.MM.DD.HHMM so each artifact is
+    uniquely named without bumping debian/changelog. An explicit $1 still
+    overrides for release builds."""
+    src = _read("packaging/build-appimage.sh")
+    assert "%Y.%m.%d.%H%M" in src
+    assert "fifine-control-deck-x86_64.AppImage" in src, \
+        "stable symlink name must be refreshed after packing"
+
+
 def test_appimage_prune_refuses_an_empty_closure():
     """The prune deletes Qt libraries. Computing the closure with ldd silently
     returned NOTHING during development — ldd only reports a resolved path, and
