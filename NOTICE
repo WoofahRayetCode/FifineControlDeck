@@ -15,5 +15,13 @@ fifine_deck/backend/StreamDock/LICENSE.vendor for its MIT license text.
 Protocol understanding was informed by the reverse-engineering demo
 rigor789/mirabox-streamdock-node (MIT) and 4ndv/mirajazz.
 
+Bundled sound effects (assets/sounds/)
+--------------------------------------
+All WAV clips under assets/sounds/ are original, synthesised audio generated
+for this project (cartoon beeps, comedy stingers, fart-like filtered-noise
+bursts, and short parody jingles). They are not sampled from commercial
+libraries. You may use them with the app under the same license as the
+application code.
+
 This project is not affiliated with or endorsed by fifine, Hotspot/Mirabox,
 or Elgato.
