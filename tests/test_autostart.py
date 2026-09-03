@@ -26,11 +26,14 @@ def test_autostart_file_falls_back_to_home_config(monkeypatch):
 
 
 def test_set_autostart_writes_and_removes_the_entry(xdg, monkeypatch):
+    monkeypatch.setattr(app, "_user_local_launcher", lambda: None)
     assert app.set_autostart(True) == 0
     path = app.autostart_file()
     entry = open(path).read()
     assert "Exec=fifine-control-deck --hidden" in entry
     assert "Type=Application" in entry
+    assert "StartupNotify=false" in entry
+    assert "window hidden" in entry
     assert app.set_autostart(False) == 0
     assert not os.path.exists(path)
     # disabling twice stays a friendly no-op
