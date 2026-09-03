@@ -2115,3 +2115,292 @@ def test_a_bare_form_step_survives_an_unrelated_edit(win):
     inner = step.get("action", step)
     assert inner.get("type") == "run_command", f"sub-action destroyed: {step}"
     assert inner.get("params", {}).get("command") == "echo hello"
+
+
+def test_create_folder_on_selected_key(win, monkeypatch):
+    w, cfg, c = win
+    monkeypatch.setattr(mw.QInputDialog, "getText",
+                        lambda *a, **k: ("Cameras", True))
+    w.selected_index = 8
+    w._create_folder_on_selected()
+    kc = cfg.active_profile().pages[0].key(8)
+    assert kc.action.type == "open_folder"
+    assert kc.label == "Cameras"
+    assert kc.folder is not None
+    from fifine_deck.device import DEVICE_PROFILE
+    last = DEVICE_PROFILE["key_count"]
+    assert kc.folder.pages[0].keys[last].action.type == "folder_back"
+
+
+def test_create_folder_picks_first_empty_when_nothing_selected(win, monkeypatch):
+    w, cfg, c = win
+    page = cfg.active_profile().pages[0]
+    page.key(1).action = mw.Action("run_command", {"command": "true"})
+    page.key(1).label = "Busy"
+    monkeypatch.setattr(mw.QInputDialog, "getText",
+                        lambda *a, **k: ("Apps", True))
+    w.selected_index = None
+    w._create_folder_on_selected()
+    assert w.selected_index == 2
+    kc = page.key(2)
+    assert kc.action.type == "open_folder"
+    assert kc.label == "Apps"
+    assert kc.folder is not None
+
+
+def test_create_folder_requires_a_slot_when_page_is_full(win):
+    w, cfg, c = win
+    from fifine_deck.device import DEVICE_PROFILE
+    page = cfg.active_profile().pages[0]
+    for i in range(1, DEVICE_PROFILE["key_count"] + 1):
+        page.key(i).action = mw.Action("run_command", {"command": "true"})
+        page.key(i).label = f"K{i}"
+    w.selected_index = None
+    w._create_folder_on_selected()
+    assert _AutoBox.infos
+    assert "Select a key first" in _AutoBox.infos[-1]
+    assert all(page.key(i).action.type != "open_folder"
+               for i in range(1, DEVICE_PROFILE["key_count"] + 1))
+
+
+def test_create_folder_replace_declined_leaves_key_alone(win, monkeypatch):
+    w, cfg, c = win
+    kc = cfg.active_profile().pages[0].key(3)
+    kc.action = mw.Action("run_command", {"command": "echo hi"})
+    kc.label = "Shell"
+    _AutoBox.answer = QMessageBox.StandardButton.No
+    prompted = []
+
+    def _boom(*a, **k):
+        prompted.append(True)
+        return ("Nope", True)
+
+    monkeypatch.setattr(mw.QInputDialog, "getText", _boom)
+    w.selected_index = 3
+    w._create_folder_on_selected()
+    assert kc.action.type == "run_command"
+    assert kc.label == "Shell"
+    assert kc.folder is None
+    assert not prompted
+    assert _AutoBox.questions
+
+
+def test_create_folder_renames_an_existing_folder(win, monkeypatch):
+    w, cfg, c = win
+    kc = cfg.active_profile().pages[0].key(5)
+    kc.action = mw.Action("open_folder", {})
+    w._ensure_folder(kc)
+    assert kc.folder is not None
+    inner = kc.folder
+    inner.pages[0].key(1).label = "Keep me"
+    monkeypatch.setattr(mw.QInputDialog, "getText",
+                        lambda *a, **k: ("Renamed", True))
+    w.selected_index = 5
+    w._create_folder_on_selected()
+    assert kc.folder is inner
+    assert kc.folder.name == "Renamed"
+    assert kc.label == "Renamed"
+    assert inner.pages[0].key(1).label == "Keep me"
+
+
+def test_create_folder_restores_a_dormant_folder(win, monkeypatch):
+    """Changing the action type away from open_folder keeps folder contents
+    dormant; Create folder… must restore that same object, not mint empty."""
+    w, cfg, c = win
+    kc = cfg.active_profile().pages[0].key(6)
+    kc.action = mw.Action("open_folder", {})
+    w._ensure_folder(kc)
+    dormant = kc.folder
+    assert dormant is not None
+    dormant.pages[0].key(2).label = "Nested"
+    kc.action = mw.Action("media", {"media": "play_pause"})
+    kc.label = "Play"
+    _AutoBox.answer = QMessageBox.StandardButton.Yes
+    monkeypatch.setattr(mw.QInputDialog, "getText",
+                        lambda *a, **k: ("Media", True))
+    w.selected_index = 6
+    w._create_folder_on_selected()
+    assert kc.action.type == "open_folder"
+    assert kc.folder is dormant
+    assert kc.folder.name == "Media"
+    assert dormant.pages[0].key(2).label == "Nested"
+    assert any("still has folder contents" in q for q in _AutoBox.questions)
+
+
+def test_create_folder_cancel_name_dialog_is_a_no_op(win, monkeypatch):
+    w, cfg, c = win
+    monkeypatch.setattr(mw.QInputDialog, "getText",
+                        lambda *a, **k: ("Ignored", False))
+    w.selected_index = 9
+    w._create_folder_on_selected()
+    kc = cfg.active_profile().pages[0].key(9)
+    assert kc.action.type == "none"
+    assert kc.folder is None
+
+
+def test_dropping_open_folder_prompts_for_a_name(win, monkeypatch):
+    """Catalog drop of Open folder must use Create folder… naming, not mint a
+    silent generic Folder."""
+    w, cfg, c = win
+    monkeypatch.setattr(mw.QInputDialog, "getText",
+                        lambda *a, **k: ("Macros", True))
+    w._on_action_dropped(7, "open_folder")
+    kc = cfg.active_profile().pages[0].key(7)
+    assert kc.action.type == "open_folder"
+    assert kc.label == "Macros"
+    assert kc.folder is not None
+    assert kc.folder.name == "Macros"
+
+
+def test_dropping_open_folder_cancel_leaves_key_alone(win, monkeypatch):
+    w, cfg, c = win
+    monkeypatch.setattr(mw.QInputDialog, "getText",
+                        lambda *a, **k: ("Nope", False))
+    w._on_action_dropped(7, "open_folder")
+    kc = cfg.active_profile().pages[0].key(7)
+    assert kc.action.type == "none"
+    assert kc.folder is None
+
+
+def test_editing_folder_label_renames_the_folder(win):
+    w, cfg, c = win
+    kc = cfg.active_profile().pages[0].key(4)
+    kc.action = mw.Action("open_folder", {})
+    w._ensure_folder(kc)
+    assert kc.folder is not None
+    w.selected_index = 4
+    w.editor.set_key(kc, 4)
+    w.editor.label_edit.setText("Cameras")
+    assert kc.folder.name == "Cameras"
+    assert kc.label == "Cameras"
+
+
+def test_key_context_menu_create_folder_signal(win, monkeypatch):
+    w, cfg, c = win
+    monkeypatch.setattr(mw.QInputDialog, "getText",
+                        lambda *a, **k: ("FromMenu", True))
+    btn = w.buttons[11]
+    assert hasattr(btn, "createFolder")
+    btn.createFolder.emit(11)
+    kc = cfg.active_profile().pages[0].key(11)
+    assert kc.action.type == "open_folder"
+    assert kc.label == "FromMenu"
+
+
+def test_key_context_menu_labels_depend_on_folder_state(win, monkeypatch):
+    """Empty key: Create folder… + disabled Open. Folder key: Rename + Open."""
+    from PyQt6.QtCore import QPoint
+    w, cfg, c = win
+    btn = w.buttons[10]
+    btn.update_preview(cfg.active_profile().pages[0].key(10))
+
+    menus = []
+
+    def _capture(self, *a, **k):
+        menus.append(self)
+        return None
+
+    monkeypatch.setattr(wdg.QMenu, "exec", _capture)
+    btn._context_menu(QPoint(0, 0))
+    assert menus
+    labels = [a.text() for a in menus[0].actions()]
+    assert labels[0] == "Create folder…"
+    assert labels[1] == "Open folder"
+    assert not menus[0].actions()[1].isEnabled()
+
+    kc = cfg.active_profile().pages[0].key(10)
+    kc.action = mw.Action("open_folder", {})
+    w._ensure_folder(kc)
+    btn.update_preview(kc)
+    menus.clear()
+    btn._context_menu(QPoint(0, 0))
+    labels = [a.text() for a in menus[0].actions()]
+    assert labels[0] == "Rename folder…"
+    assert menus[0].actions()[1].isEnabled()
+
+
+def test_editor_open_folder_fills_empty_label_and_icon(win):
+    """Choosing Open folder in the action dropdown (no Create folder… prompt)
+    still produces a named, icon-bearing folder key."""
+    w, cfg, c = win
+    kc = cfg.active_profile().pages[0].key(12)
+    assert kc.label == ""
+    assert kc.icon == ""
+    w.selected_index = 12
+    w.editor.set_key(kc, 12)
+    w.editor.params.type_combo.setCurrentIndex(
+        w.editor.params.type_combo.findData("open_folder"))
+    assert kc.action.type == "open_folder"
+    assert kc.folder is not None
+    assert kc.label == "Folder"
+    assert "folder" in kc.icon
+    assert kc.folder.name == "Folder"
+    assert w.editor.label_edit.text() == "Folder"
+
+
+def test_minimize_to_taskbar_menu_exists(win):
+    w, cfg, c = win
+    opts = [a.text() for a in w.menuBar().actions()[0].menu().actions()]
+    assert any("Minimize to taskbar" in t for t in opts)
+    assert any("Create folder on selected key" in t for t in opts)
+    assert any("Show in system tray" in t for t in opts)
+    assert any("Start on login" in t for t in opts)
+    assert hasattr(w, "create_folder_btn")
+    w._minimize_to_taskbar()
+    assert w.isMinimized()
+
+
+def test_close_hides_instead_of_quitting(win):
+    """✕ / Hide to background must keep the process (and deck) alive."""
+    from PyQt6.QtGui import QCloseEvent
+    w, cfg, c = win
+    w.show()
+    assert not w._quitting
+    w.close()
+    assert not w._quitting
+    assert not w.isVisible()
+    # A synthetic closeEvent is ignored (does not accept → quit).
+    e = QCloseEvent()
+    w.closeEvent(e)
+    assert not e.isAccepted()
+    assert not w._quitting
+
+
+def test_minimize_to_taskbar_is_not_hide(win):
+    w, cfg, c = win
+    w.show()
+    w._minimize_to_taskbar()
+    assert w.isMinimized()
+    # Minimized windows remain "visible" to Qt; Hide removes them from the panel.
+    assert w.isVisible()
+
+
+def test_tray_stays_off_without_a_host(win, monkeypatch):
+    w, cfg, c = win
+    monkeypatch.setattr(w, "_tray_host_present", lambda: False)
+    monkeypatch.delenv("FIFINE_TRAY", raising=False)
+    cfg.show_tray = True
+    w._apply_tray()
+    assert w.tray is None
+
+
+def test_tray_builds_when_preferred_and_host_present(win, monkeypatch):
+    w, cfg, c = win
+    monkeypatch.setattr(w, "_tray_host_present", lambda: True)
+    monkeypatch.delenv("FIFINE_TRAY", raising=False)
+    cfg.show_tray = True
+    w._apply_tray()
+    assert w.tray is not None
+    assert w.tray.isVisible()
+    cfg.show_tray = False
+    w._apply_tray()
+    assert w.tray is None
+
+
+def test_tray_forced_off_by_env(win, monkeypatch):
+    w, cfg, c = win
+    monkeypatch.setattr(w, "_tray_host_present", lambda: True)
+    monkeypatch.setenv("FIFINE_TRAY", "0")
+    cfg.show_tray = True
+    w._apply_tray()
+    assert w.tray is None
