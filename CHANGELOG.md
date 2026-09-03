@@ -4,6 +4,48 @@ All notable changes to **fifine Control Deck** are documented here. The format
 is based on [Keep a Changelog](https://keepachangelog.com/), and the project
 follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **System tray by default** when the desktop provides a StatusNotifier host
+  (e.g. KDE Plasma). New Options → **Show in system tray** preference
+  (`show_tray` in config; default on). Close/hide keeps keys active; left-click
+  the tray icon to show the window, right-click → Quit. `FIFINE_TRAY=0` forces
+  the tray off. Desktops without a tray host (stock GNOME) keep the previous
+  hide-to-background + relaunch behaviour.
+- **Native OBS Studio control via obs-websocket v5.** New OBS action category:
+  switch program/preview scene, studio-mode transition, show/hide/toggle a
+  source, start/stop/toggle recording and streaming, and mute/unmute/toggle an
+  audio input. Connection is configured once under **Options → OBS settings…**
+  (host, port, password, with a Test connection button). Uses a stdlib-only
+  WebSocket client with short timeouts, reconnect-on-stale, and clear logging
+  when OBS is down or the password is wrong — a missing OBS never freezes the
+  deck. Requires OBS 28+ with the WebSocket server enabled
+  (Tools → WebSocket Server Settings; default port 4455).
+- **Minimize to taskbar** (Options → Minimize to taskbar, Ctrl+M) keeps the
+  window on the panel; Hide to background remains a separate action. Close /
+  Hide copy now spells out that keys stay active and Quit is Ctrl+Q.
+
+### Changed
+- **Start on login** autostart Exec prefers `~/.local/bin/fifine-control-deck`
+  when that launcher exists (programs-menu / AppImage install), so rebuilding
+  a stamped AppImage no longer breaks login start. Autostart entries also set
+  `StartupNotify=false` for a quiet hidden launch.
+- **Create folder…** entry points for shortcut folders (Stream Deck–style nested
+  pages): toolbar button, **Options → Create folder on selected key…**
+  (Ctrl+Shift+F), right-click a key, or drop **Open folder** from the action
+  catalog. Each prompts for a name, builds a nested page with a Back key, and
+  keeps the folder name in sync when you edit the key label. Right-click offers
+  **Rename folder…** / **Open folder** when the key is already a folder.
+- **OBS starter layout** for brand-new configs: Streaming, Recording, and
+  General folders (mic mute, stream, record, stream+record, stop all, sample
+  scenes). Existing configs are not changed.
+- **Play sound** action with a built-in comedy library (censor bleep, airhorn,
+  fart variants, laugh, rimshot, sad trombone, circus/elevator/kazoo jingles,
+  slide whistle, …), custom file paths, volume, and random picks. Overlapping
+  presses mix. Brand-new configs get a **Sounds** soundboard folder plus
+  quick Random Fart / Random Jingle keys.
+
 ## [0.12.9] - 2026-07-26
 
 Hardening release. Fifteen multi-agent audit rounds went through the whole
