@@ -31,6 +31,9 @@ class Ctx:
     def set_brightness(self, percent): self.calls.append(("set_brightness", percent))
     def adjust_brightness(self, delta): self.calls.append(("adjust_brightness", delta))
     def sleep_screen(self): self.calls.append(("sleep_screen",))
+    def obs_connection(self):
+        self.calls.append(("obs_connection",))
+        return ("127.0.0.1", 4455, "secret")
 
 
 @pytest.fixture
@@ -45,7 +48,9 @@ def rec(monkeypatch):
         return fn
 
     for name in ("_popen_detached", "_send_hotkey", "_type_text",
-                 "_media", "_volume", "_close_app"):
+                 "_media", "_volume", "_close_app", "_play_sound",
+                 "_obs_scene", "_obs_transition", "_obs_source",
+                 "_obs_output", "_obs_mute"):
         monkeypatch.setattr(actions, name, recorder(name))
     return calls
 
@@ -530,3 +535,93 @@ def test_default_icon_survives_a_non_scalar_param():
         assert icon and label                         # fell back, did not raise
     # the normal lookup still works
     assert default_icon_for(Action("volume", {"cmd": "mute"}))[0] == "mute"
+
+
+# -- OBS ------------------------------------------------------------------
+
+def test_obs_actions_dispatch(rec):
+    ctx = Ctx()
+    actions.execute(Action("obs_scene", {"scene": "Cam"}), ctx)
+    actions.execute(Action("obs_preview_scene", {"scene": "BRB"}), ctx)
+    actions.execute(Action("obs_transition", {}), ctx)
+    actions.execute(Action("obs_source",
+                           {"scene": "Main", "source": "Webcam",
+                            "state": "hide"}), ctx)
+    actions.execute(Action("obs_recording", {"cmd": "toggle"}), ctx)
+    actions.execute(Action("obs_streaming", {"cmd": "start"}), ctx)
+    actions.execute(Action("obs_mute",
+                           {"input": "Mic/Aux", "state": "mute"}), ctx)
+    assert rec == [
+        ("_obs_scene", (ctx, "Cam"), {}),
+        ("_obs_scene", (ctx, "BRB"), {"preview": True}),
+        ("_obs_transition", (ctx,), {}),
+        ("_obs_source", (ctx, "Main", "Webcam", "hide"), {}),
+        ("_obs_output", (ctx, "recording", "toggle"), {}),
+        ("_obs_output", (ctx, "streaming", "start"), {}),
+        ("_obs_mute", (ctx, "Mic/Aux", "mute"), {}),
+    ]
+
+
+def test_obs_request_maps_to_websocket(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "fifine_deck.obs_ws.call",
+        lambda host, port, password, req, data=None: (
+            calls.append((host, port, password, req, data)) or {}))
+    ctx = Ctx()
+    actions._obs_scene(ctx, "Intro")
+    actions._obs_output(ctx, "recording", "stop")
+    assert calls == [
+        ("127.0.0.1", 4455, "secret", "SetCurrentProgramScene",
+         {"sceneName": "Intro"}),
+        ("127.0.0.1", 4455, "secret", "StopRecord", None),
+    ]
+
+
+def test_obs_blank_scene_is_noop(monkeypatch, caplog):
+    import logging
+    calls = []
+    monkeypatch.setattr(
+        "fifine_deck.obs_ws.call",
+        lambda *a, **k: calls.append(a) or {})
+    with caplog.at_level(logging.WARNING, logger="fifine_deck.actions"):
+        actions._obs_scene(Ctx(), "   ")
+    assert calls == []
+    assert any("no scene name" in r.message for r in caplog.records)
+
+
+def test_obs_source_toggle_fetches_id_and_state(monkeypatch):
+    calls = []
+
+    def fake_call(host, port, password, req, data=None):
+        calls.append((req, data))
+        if req == "GetSceneItemId":
+            return {"sceneItemId": 7}
+        if req == "GetSceneItemEnabled":
+            return {"sceneItemEnabled": True}
+        return {}
+
+    monkeypatch.setattr("fifine_deck.obs_ws.call", fake_call)
+    actions._obs_source(Ctx(), "Main", "Cam", "toggle")
+    assert calls == [
+        ("GetSceneItemId", {"sceneName": "Main", "sourceName": "Cam"}),
+        ("GetSceneItemEnabled", {"sceneName": "Main", "sceneItemId": 7}),
+        ("SetSceneItemEnabled",
+         {"sceneName": "Main", "sceneItemId": 7, "sceneItemEnabled": False}),
+    ]
+
+
+def test_play_sound_dispatches(rec):
+    actions.execute(Action("play_sound", {
+        "clip": "bleep", "file": "", "volume": "70"}))
+    assert rec == [("_play_sound", ("bleep", "", "70"), {})]
+
+
+def test_obs_helpers_never_raise_when_ws_fails(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("fifine_deck.obs_ws.call", boom)
+    # execute()'s outer guard must keep a broken OBS path from killing the
+    # reader thread — even if a helper lets an unexpected exception through.
+    actions.execute(Action("obs_recording", {"cmd": "toggle"}), Ctx())
