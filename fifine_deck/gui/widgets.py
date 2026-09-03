@@ -2,16 +2,18 @@
 from __future__ import annotations
 
 import logging
+import os
 
 from PyQt6.QtCore import (Qt, pyqtSignal, QSize, QMimeData, QPoint, QObject,
                           QEvent, QRegularExpression)
-from PyQt6.QtGui import (QPixmap, QColor, QIcon, QDrag,
+from PyQt6.QtGui import (QPixmap, QColor, QIcon, QDrag, QAction,
                          QRegularExpressionValidator)
 from PyQt6.QtWidgets import (
     QToolButton, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel,
     QLineEdit, QPlainTextEdit, QComboBox, QPushButton, QColorDialog, QFileDialog,
     QDoubleSpinBox, QDialog, QScrollArea, QGridLayout, QListWidget,
     QListWidgetItem, QAbstractItemView, QFrame, QApplication, QMessageBox,
+    QMenu,
 )
 
 from typing import Callable
@@ -159,16 +161,20 @@ class KeyButton(QToolButton):
     actionDropped = pyqtSignal(int, str)   # (index, action_type)
     keyMoved = pyqtSignal(int, int)        # (source_index, target_index) swap
     openFolder = pyqtSignal(int)           # double-click to enter a folder key
+    createFolder = pyqtSignal(int)         # context-menu: turn this key into a folder
 
     def __init__(self, index: int, size: int = 96):
         super().__init__()
         self.index = index
         self._size = size
+        self._kc: KeyConfig | None = None
         self.setCheckable(True)
         self.setFixedSize(size + 12, size + 12)
         self.setIconSize(QSize(size, size))
         self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self.setAcceptDrops(True)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._context_menu)
         self._base_qss = (
             "QToolButton{border:2px solid #333;border-radius:10px;background:#0b0b12;}"
             "QToolButton:checked{border:2px solid #1551ff;}"
@@ -177,7 +183,22 @@ class KeyButton(QToolButton):
         self.clicked.connect(lambda: self.selected.emit(self.index))
         self._press_pos: QPoint | None = None
 
+    def _context_menu(self, pos):
+        menu = QMenu(self)
+        is_folder = (self._kc is not None
+                     and self._kc.action.type == "open_folder")
+        create = QAction(
+            "Rename folder…" if is_folder else "Create folder…", self)
+        create.triggered.connect(lambda: self.createFolder.emit(self.index))
+        menu.addAction(create)
+        open_act = QAction("Open folder", self)
+        open_act.setEnabled(is_folder)
+        open_act.triggered.connect(lambda: self.openFolder.emit(self.index))
+        menu.addAction(open_act)
+        menu.exec(self.mapToGlobal(pos))
+
     def update_preview(self, kc: KeyConfig):
+        self._kc = kc
         if kc.action.type == "monitor":
             # Preferably the controller's live values (works offline too);
             # placeholder only when no provider is wired (bare widget tests).
@@ -425,6 +446,16 @@ class ActionParamsWidget(QWidget):
             self._multi_editor.changed.connect(self._emit)
             self._params_box.addWidget(self._multi_editor)
             return
+        if atype == "open_folder":
+            hint = QLabel(
+                "This key opens a nested page of shortcuts. "
+                "Edit the Label above to name the folder. "
+                "Double-click the key (or use Create folder…) to open it; "
+                "put a Back key inside to return.")
+            hint.setWordWrap(True)
+            hint.setStyleSheet("color:#9a9a9a;")
+            self._params_box.addWidget(hint)
+            return
         spec = ACTION_TYPES.get(atype, {}).get("params", [])
         if not spec:
             return
@@ -488,6 +519,64 @@ class ActionParamsWidget(QWidget):
                     w.addItem(cur)
                     w.setCurrentIndex(w.count() - 1)
                 w.currentIndexChanged.connect(self._emit)
+            elif kind == "sound":
+                from .. import sounds
+                w = _protect_wheel(QComboBox(), self._nowheel)
+                # Grouped: builtins by category, then random picks, then custom.
+                by_cat: dict[str, list] = {}
+                for c in sounds.list_clips():
+                    by_cat.setdefault(c["category"], []).append(c)
+                for cat in sorted(by_cat):
+                    w.addItem(f"— {cat} —", "")
+                    # Non-selectable headers: Qt has no native separator data,
+                    # so we keep them selectable but empty data is ignored on
+                    # collect by falling back to previous / bleep.
+                    for c in by_cat[cat]:
+                        w.addItem(c["label"], c["name"])
+                w.addItem("— Random —", "")
+                w.addItem("Random (any)", "random")
+                w.addItem("Random funny", "random_funny")
+                w.addItem("Random fart", "random_fart")
+                w.addItem("Random music", "random_music")
+                w.addItem("Custom file…", "custom")
+                cur = str(values.get(key, "bleep") or "bleep")
+                j = w.findData(cur)
+                if j >= 0:
+                    w.setCurrentIndex(j)
+                elif cur:
+                    w.addItem(cur, cur)
+                    w.setCurrentIndex(w.count() - 1)
+                else:
+                    j = w.findData("bleep")
+                    if j >= 0:
+                        w.setCurrentIndex(j)
+                w.setProperty("kind", "sound")
+                w.currentIndexChanged.connect(self._emit)
+            elif kind == "filepath":
+                row = QWidget()
+                hl = QHBoxLayout(row)
+                hl.setContentsMargins(0, 0, 0, 0)
+                w = QLineEdit(str(values.get(key, "")))
+                w.setPlaceholderText("/path/to/sound.wav")
+                w.textChanged.connect(self._emit)
+                browse = QPushButton("…")
+                browse.setFixedWidth(32)
+                browse.setToolTip("Browse for an audio file")
+
+                def _browse(_=None, edit=w):
+                    path, _f = QFileDialog.getOpenFileName(
+                        self, "Audio file",
+                        edit.text() or os.path.expanduser("~"),
+                        "Audio (*.wav *.mp3 *.ogg *.flac *.m4a);;All (*)")
+                    if path:
+                        edit.setText(path)
+
+                browse.clicked.connect(_browse)
+                hl.addWidget(w, 1)
+                hl.addWidget(browse)
+                self._params[key] = w
+                form.addRow(label, row)
+                continue
             else:
                 w = QLineEdit(str(values.get(key, ""))); w.textChanged.connect(self._emit)
             self._params[key] = w
@@ -524,9 +613,16 @@ class ActionParamsWidget(QWidget):
             if isinstance(w, QPlainTextEdit):
                 out[k] = w.toPlainText()
             elif isinstance(w, QComboBox):
-                # profiles combo stores the profile id in item data
-                if w.property("kind") == "profiles":
-                    out[k] = w.currentData() or ""
+                # profiles / sound combos store the real value in item data
+                if w.property("kind") in ("profiles", "sound"):
+                    data = w.currentData()
+                    # Category headers use empty data — keep the previous
+                    # value rather than wiping the clip to "".
+                    if data in (None, "") and w.property("kind") == "sound":
+                        out[k] = out.get(k) or self._orig_action.params.get(
+                            k, "bleep")
+                    else:
+                        out[k] = data or ""
                 else:
                     out[k] = w.currentText()
             elif isinstance(w, QLineEdit):
