@@ -81,6 +81,7 @@ class ActionContext(Protocol):
     def set_brightness(self, percent: int) -> None: ...
     def adjust_brightness(self, delta: int) -> None: ...
     def sleep_screen(self) -> None: ...
+    def obs_connection(self) -> tuple[str, int, str]: ...
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +98,10 @@ ACTION_TYPES: dict[str, dict] = {
     "password":      {"label": "Type password", "params": [("password", "password", "Password")]},
     "media":         {"label": "Media control", "params": [("cmd", "choice:play-pause,next,previous,stop", "Command")]},
     "volume":        {"label": "Volume", "params": [("cmd", "choice:up,down,mute", "Command"), ("step", "text", "Step % (up/down)")]},
+    "play_sound":    {"label": "Play sound", "params": [
+        ("clip", "sound", "Clip"),
+        ("file", "filepath", "Custom audio file"),
+        ("volume", "text", "Volume % (1–100)")]},
     "close_app":     {"label": "Close application", "params": [("target", "text", "App / window name")]},
     "next_page":     {"label": "Next page", "params": []},
     "prev_page":     {"label": "Previous page", "params": []},
@@ -117,6 +122,23 @@ ACTION_TYPES: dict[str, dict] = {
     "open_folder":   {"label": "Open folder", "params": []},
     "folder_back":   {"label": "Back (exit folder)", "params": []},
     "multi":         {"label": "Multi-action (steps)", "params": []},  # edited specially
+    # OBS Studio via obs-websocket v5 (Options → OBS settings for host/port/password).
+    "obs_scene":     {"label": "OBS: Switch scene", "params": [
+        ("scene", "text", "Scene name")]},
+    "obs_preview_scene": {"label": "OBS: Preview scene", "params": [
+        ("scene", "text", "Scene name")]},
+    "obs_transition": {"label": "OBS: Studio transition", "params": []},
+    "obs_source":    {"label": "OBS: Show / hide source", "params": [
+        ("scene", "text", "Scene name"),
+        ("source", "text", "Source name"),
+        ("state", "choice:show,hide,toggle", "State")]},
+    "obs_recording": {"label": "OBS: Recording", "params": [
+        ("cmd", "choice:start,stop,toggle", "Command")]},
+    "obs_streaming": {"label": "OBS: Streaming", "params": [
+        ("cmd", "choice:start,stop,toggle", "Command")]},
+    "obs_mute":      {"label": "OBS: Mute input", "params": [
+        ("input", "text", "Input / source name"),
+        ("state", "choice:mute,unmute,toggle", "State")]},
 }
 
 
@@ -124,7 +146,9 @@ ACTION_TYPES: dict[str, dict] = {
 ACTION_CATALOG = [
     ("Application", ["launch_app", "run_command", "open_url", "close_app"]),
     ("Keyboard",    ["hotkey", "text", "password"]),
-    ("Media",       ["media", "volume"]),
+    ("Media",       ["media", "volume", "play_sound"]),
+    ("OBS",         ["obs_scene", "obs_preview_scene", "obs_transition",
+                     "obs_source", "obs_recording", "obs_streaming", "obs_mute"]),
     ("System",      ["monitor"]),
     ("Deck",        ["next_page", "prev_page", "goto_page", "switch_profile",
                      "next_profile", "prev_profile", "brightness", "sleep_screen"]),
@@ -142,6 +166,7 @@ ACTION_DEFAULT_ICON = {
     "password": ("lock", "Password"),
     "media": ("play", "Play"),
     "volume": ("volume_up", "Volume"),
+    "play_sound": ("play", "Sound"),
     "close_app": ("power", "Close"),
     "next_page": ("next_page", "Next"),
     "prev_page": ("prev_page", "Prev"),
@@ -157,6 +182,13 @@ ACTION_DEFAULT_ICON = {
     "open_folder": ("folder", "Folder"),
     "folder_back": ("prev_page", "Back"),
     "multi": ("star", "Multi"),
+    "obs_scene": ("camera", "Scene"),
+    "obs_preview_scene": ("camera", "Preview"),
+    "obs_transition": ("next_page", "Cut"),
+    "obs_source": ("dot", "Source"),
+    "obs_recording": ("stop", "Record"),
+    "obs_streaming": ("web", "Stream"),
+    "obs_mute": ("mute", "Mute"),
 }
 
 
@@ -178,9 +210,33 @@ def default_icon_for(action) -> tuple[str, str]:
     if t == "media":
         return ({"play-pause": "play", "next": "next", "previous": "prev",
                  "stop": "stop"}.get(_pick("cmd", "play-pause"), "play"), "Media")
+    if t == "play_sound":
+        clip = _pick("clip", "bleep")
+        labels = {
+            "bleep": "Bleep", "boop": "Boop", "airhorn": "Horn",
+            "fart_squeak": "Fart", "fart_wet": "Fart", "fart_long": "Fart",
+            "fart_trumpet": "Fart", "fart_tiny": "Fart",
+            "random_fart": "Fart?", "random_funny": "Random",
+            "random_music": "Jingle", "random": "Random",
+            "custom": "Sound", "circus": "Circus", "elevator": "Elevator",
+            "laugh": "Ha", "rimshot": "Ba-dum", "sad_trombone": "Wah",
+        }
+        return ("play", labels.get(clip, "Sound"))
     if t == "brightness":
         return ({"up": "brightness_up", "down": "brightness_down",
                  "set": "brightness_up"}.get(_pick("mode", "set"), "brightness_up"), "Bright")
+    if t == "obs_recording":
+        return ({"start": "play", "stop": "stop", "toggle": "stop"}
+                .get(_pick("cmd", "toggle"), "stop"), "Record")
+    if t == "obs_streaming":
+        return ({"start": "play", "stop": "stop", "toggle": "web"}
+                .get(_pick("cmd", "toggle"), "web"), "Stream")
+    if t == "obs_mute":
+        return ({"mute": "mute", "unmute": "mic", "toggle": "mute"}
+                .get(_pick("state", "toggle"), "mute"), "Mute")
+    if t == "obs_source":
+        return ({"show": "dot", "hide": "dot", "toggle": "dot"}
+                .get(_pick("state", "toggle"), "dot"), "Source")
     return ACTION_DEFAULT_ICON.get(t, ("", ""))
 
 
@@ -479,6 +535,11 @@ def _media(cmd: str) -> None:
         log.warning("media control needs 'playerctl'")
 
 
+def _play_sound(clip: str, file_path: str = "", volume: str = "80") -> None:
+    from . import sounds
+    sounds.play(clip or "bleep", file_path or "", volume or "80")
+
+
 SINK = "@DEFAULT_AUDIO_SINK@"
 
 # Upper bound for a multi-action's per-step delay, matching the step editor's
@@ -523,6 +584,110 @@ def _volume(cmd: str, step: str) -> None:
 # depth would run without ever being listed in the "this config runs shell
 # commands" dialog. Capping both at the same number keeps the promise.
 MAX_STEP_DEPTH = 32
+
+
+def _obs_conn(context: ActionContext | None) -> tuple[str, int, str] | None:
+    """Resolve OBS host/port/password from the controller, or None."""
+    if context is None:
+        log.warning("OBS action needs a running controller (no connection settings)")
+        return None
+    try:
+        host, port, password = context.obs_connection()
+    except Exception as e:  # noqa: BLE001
+        log.warning("OBS connection settings unavailable: %s", e)
+        return None
+    return host, port, password
+
+
+def _obs_request(context: ActionContext | None, request_type: str,
+                 request_data: dict | None = None) -> Optional[dict]:
+    """Send one OBS request using the global Options connection settings."""
+    from . import obs_ws
+    conn = _obs_conn(context)
+    if conn is None:
+        return None
+    host, port, password = conn
+    return obs_ws.call(host, port, password, request_type, request_data)
+
+
+def _obs_scene(context: ActionContext | None, scene: str, *, preview: bool = False) -> None:
+    scene = (scene or "").strip()
+    if not scene:
+        log.warning("OBS scene action has no scene name")
+        return
+    req = "SetCurrentPreviewScene" if preview else "SetCurrentProgramScene"
+    _obs_request(context, req, {"sceneName": scene})
+
+
+def _obs_transition(context: ActionContext | None) -> None:
+    _obs_request(context, "TriggerStudioModeTransition")
+
+
+def _obs_source(context: ActionContext | None, scene: str, source: str,
+                state: str) -> None:
+    scene = (scene or "").strip()
+    source = (source or "").strip()
+    state = (state or "toggle").strip().lower()
+    if not scene or not source:
+        log.warning("OBS source action needs both scene and source names")
+        return
+    info = _obs_request(context, "GetSceneItemId",
+                        {"sceneName": scene, "sourceName": source})
+    if info is None:
+        return
+    item_id = info.get("sceneItemId")
+    if item_id is None:
+        log.warning("OBS: no scene item id for %r in scene %r", source, scene)
+        return
+    if state == "toggle":
+        cur = _obs_request(context, "GetSceneItemEnabled",
+                           {"sceneName": scene, "sceneItemId": item_id})
+        if cur is None:
+            return
+        enabled = not bool(cur.get("sceneItemEnabled", True))
+    elif state == "show":
+        enabled = True
+    elif state == "hide":
+        enabled = False
+    else:
+        log.warning("OBS source state must be show/hide/toggle, got %r", state)
+        return
+    _obs_request(context, "SetSceneItemEnabled",
+                 {"sceneName": scene, "sceneItemId": item_id,
+                  "sceneItemEnabled": enabled})
+
+
+def _obs_output(context: ActionContext | None, kind: str, cmd: str) -> None:
+    """kind is 'recording' or 'streaming'; cmd is start/stop/toggle."""
+    cmd = (cmd or "toggle").strip().lower()
+    table = {
+        ("recording", "start"): "StartRecord",
+        ("recording", "stop"): "StopRecord",
+        ("recording", "toggle"): "ToggleRecord",
+        ("streaming", "start"): "StartStream",
+        ("streaming", "stop"): "StopStream",
+        ("streaming", "toggle"): "ToggleStream",
+    }
+    req = table.get((kind, cmd))
+    if not req:
+        log.warning("OBS %s cmd must be start/stop/toggle, got %r", kind, cmd)
+        return
+    _obs_request(context, req)
+
+
+def _obs_mute(context: ActionContext | None, input_name: str, state: str) -> None:
+    input_name = (input_name or "").strip()
+    state = (state or "toggle").strip().lower()
+    if not input_name:
+        log.warning("OBS mute action has no input name")
+        return
+    if state == "toggle":
+        _obs_request(context, "ToggleInputMute", {"inputName": input_name})
+    elif state in ("mute", "unmute"):
+        _obs_request(context, "SetInputMute",
+                     {"inputName": input_name, "inputMuted": state == "mute"})
+    else:
+        log.warning("OBS mute state must be mute/unmute/toggle, got %r", state)
 
 
 def execute(action, context: ActionContext | None = None,
@@ -572,6 +737,9 @@ def execute(action, context: ActionContext | None = None,
             _media(p.get("cmd", "play-pause"))
         elif t == "volume":
             _volume(p.get("cmd", "up"), p.get("step", "5"))
+        elif t == "play_sound":
+            _play_sound(p.get("clip", "bleep"), p.get("file", ""),
+                        p.get("volume", "80"))
         elif t == "close_app":
             _close_app(p.get("target", ""))
         elif t == "monitor":
@@ -617,6 +785,21 @@ def execute(action, context: ActionContext | None = None,
                 context.adjust_brightness(abs(val))
             elif mode == "down":
                 context.adjust_brightness(-abs(val))
+        elif t == "obs_scene":
+            _obs_scene(context, p.get("scene", ""))
+        elif t == "obs_preview_scene":
+            _obs_scene(context, p.get("scene", ""), preview=True)
+        elif t == "obs_transition":
+            _obs_transition(context)
+        elif t == "obs_source":
+            _obs_source(context, p.get("scene", ""), p.get("source", ""),
+                        p.get("state", "toggle"))
+        elif t == "obs_recording":
+            _obs_output(context, "recording", p.get("cmd", "toggle"))
+        elif t == "obs_streaming":
+            _obs_output(context, "streaming", p.get("cmd", "toggle"))
+        elif t == "obs_mute":
+            _obs_mute(context, p.get("input", ""), p.get("state", "toggle"))
         elif t == "multi":
             from .model import Action as _A
             if _depth >= MAX_STEP_DEPTH:
@@ -659,7 +842,8 @@ def execute(action, context: ActionContext | None = None,
 def environment_summary() -> str:
     return (f"session={'wayland' if IS_WAYLAND else 'x11'} "
             f"audio={AUDIO or 'none'} keytool={KEY_TOOL or 'none'} "
-            f"playerctl={'yes' if HAS_PLAYERCTL else 'no'}"
+            f"playerctl={'yes' if HAS_PLAYERCTL else 'no'} "
+            f"obs=ws5"
             + (" [snap]" if IN_SNAP else ""))
 
 
