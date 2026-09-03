@@ -709,6 +709,15 @@ def test_sleep_with_screen_round_trips():
     assert DeckConfig.from_dict(d).sleep_with_screen is True
 
 
+def test_show_tray_round_trips():
+    c = DeckConfig()
+    assert c.show_tray is True                  # default: tray when host exists
+    c.show_tray = False
+    assert DeckConfig.from_dict(c.to_dict()).show_tray is False
+    d = c.to_dict(); del d["show_tray"]
+    assert DeckConfig.from_dict(d).show_tray is True
+
+
 def _cfg_with_action(action):
     return DeckConfig.from_dict({"profiles": [{"name": "P", "pages": [
         {"keys": {"1": {"label": "x", "action": action}}}]}]})
@@ -760,6 +769,24 @@ def test_iter_command_actions_still_finds_plain_and_one_level_multi():
     assert [c for _, c in iter_command_actions(_cfg_with_action(one))] == ["id"]
 
 
+def test_obs_settings_round_trip():
+    cfg = DeckConfig(obs_host="192.168.1.9", obs_port=4456,
+                     obs_secret_id="pw-obs", obs_password="")
+    d = cfg.to_dict()
+    assert d["obs_host"] == "192.168.1.9"
+    assert d["obs_port"] == 4456
+    assert d["obs_secret_id"] == "pw-obs"
+    assert "obs_password" not in d          # secret_id wins; no cleartext
+    back = DeckConfig.from_dict(d)
+    assert back.obs_host == "192.168.1.9" and back.obs_port == 4456
+    assert back.obs_secret_id == "pw-obs"
+    # Cleartext fallback when no secret_id
+    cfg2 = DeckConfig.from_dict({"obs_password": "plain", "obs_port": 0})
+    assert cfg2.obs_password == "plain"
+    assert cfg2.obs_port == 4455            # out-of-range port falls back
+    assert "obs_password" in cfg2.to_dict()
+
+
 def test_iter_config_secret_ids_is_exhaustive():
     """The secret reconcile deletes keyring entries NOT in this set, so it must
     find EVERY secret_id the config references — key action, hold action,
@@ -784,6 +811,9 @@ def test_iter_config_secret_ids_is_exhaustive():
     assert set(iter_config_secret_ids(cfg)) == {
         "k_action", "k_hold", "k_multi", "folder_key", "folder_knob",
         "knob_press", "knob_left", "knob_right"}
+    # Top-level OBS WebSocket password binding must also be kept.
+    cfg.obs_secret_id = "obs-ws-pw"
+    assert "obs-ws-pw" in set(iter_config_secret_ids(cfg))
 
 
 def test_iter_step_walk_terminates_on_a_cyclic_config():
