@@ -175,34 +175,62 @@ def autostart_file() -> str:
 _AUTOSTART_ENTRY = """[Desktop Entry]
 Type=Application
 Name=fifine Control Deck
-Comment=Keep the deck active on login (window hidden)
+Comment=Keep the deck active on login (window hidden; keys work immediately)
 Exec={exec}
 Icon=fifine-control-deck
 Terminal=false
+StartupNotify=false
 X-GNOME-Autostart-enabled=true
 """
+
+
+def _quote_desktop_exec_path(path: str) -> str:
+    """Quote a filesystem path for a desktop-entry Exec= line (XDG quoting)."""
+    for ch in ("\\", '"', "`", "$"):
+        path = path.replace(ch, "\\" + ch)
+    # A literal % must be doubled or the session manager parses it as a
+    # desktop-entry field code (%f, %u, ...), breaking the launch.
+    path = path.replace("%", "%%")
+    return f'"{path}"'
+
+
+def _user_local_launcher() -> str | None:
+    """Stable per-user launcher (~/.local/bin/fifine-control-deck), if present.
+
+    Prefer this over $APPIMAGE: AppImage rebuilds stamp a new filename, and an
+    autostart Exec pointing at the old stamp silently fails on the next login.
+    The programs-menu install keeps this symlink aimed at the current build.
+    """
+    path = os.path.join(os.path.expanduser("~/.local/bin"), "fifine-control-deck")
+    try:
+        if os.path.isfile(path) or os.path.islink(path):
+            # Broken symlink still "exists" as a link — reject it so we fall
+            # through to $APPIMAGE / PATH rather than writing a dead Exec.
+            if os.path.exists(path):
+                return path
+    except OSError:
+        pass
+    return None
 
 
 def _autostart_exec() -> str:
     """The Exec line for the autostart entry.
 
-    An AppImage installs nothing on PATH — it is launched by its own path,
-    exported as $APPIMAGE. Writing the static `fifine-control-deck` command
-    there produced a dangling Exec that failed command-not-found on login,
-    silently, while the UI reported autostart was ON. Inside the bundle, point
-    at $APPIMAGE; the .deb (/usr/bin) and snap (/snap/bin) keep the PATH command.
+    Preference order:
+      1. ~/.local/bin/fifine-control-deck when that launcher exists (stable
+         across AppImage rebuilds; used by the programs-menu install).
+      2. $APPIMAGE when running inside the AppImage bundle (FIFINE_IN_BUNDLE).
+      3. The PATH command `fifine-control-deck` (.deb / snap / system install).
+
+    An AppImage installs nothing on PATH by itself — writing only the bare
+    command produced a dangling Exec that failed command-not-found on login,
+    silently, while the UI reported autostart was ON.
     """
+    local = _user_local_launcher()
+    if local is not None:
+        return f"{_quote_desktop_exec_path(local)} --hidden"
     if os.environ.get("FIFINE_IN_BUNDLE") == "1" and os.environ.get("APPIMAGE"):
-        # Desktop-entry Exec quoting: the path must be double-quoted or a space
-        # (or ", `, $, \) in it silently breaks start-on-login; inside quotes
-        # those four characters are backslash-escaped per the XDG spec.
-        path = os.environ["APPIMAGE"]
-        for ch in ("\\", '"', "`", "$"):
-            path = path.replace(ch, "\\" + ch)
-        # A literal % must be doubled or the session manager parses it as a
-        # desktop-entry field code (%f, %u, ...), breaking the launch.
-        path = path.replace("%", "%%")
-        return f'"{path}" --hidden'
+        return f"{_quote_desktop_exec_path(os.environ['APPIMAGE'])} --hidden"
     return "fifine-control-deck --hidden"
 
 
