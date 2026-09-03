@@ -75,6 +75,23 @@ expectations:
   Key actions run on a worker thread, so a slow/delayed macro never blocks the
   keypad. Every key can also carry a **hold action** — a second action that
   fires after long-pressing the key (~0.5 s).
+- **OBS Studio** (obs-websocket v5, OBS 28+): switch scenes, show/hide sources,
+  start/stop/toggle recording and streaming, mute inputs, and fire a studio-mode
+  transition. Configure the connection once under **Options → OBS settings…**
+  (host, port, password). Enable the server in OBS under
+  *Tools → WebSocket Server Settings* (default port 4455). A brand-new install
+  ships with **Streaming**, **Recording**, and **General** folders already set
+  up (mic mute, stream, record, stream+record, …).
+- **Minimize to taskbar** (Ctrl+M), **hide to background** (✕ / Ctrl+W — keys
+  stay active; Quit is Ctrl+Q), and a **system tray** icon when the desktop
+  provides one (Options → Show in system tray; on by default). **Create folder…**
+  (Ctrl+Shift+F) turns a key into a named folder of shortcuts (toolbar, Options
+  menu, right-click a key, or drop **Open folder** from the catalog).
+- **Play sound** — built-in comedy clips (bleeps for censoring, farts, airhorn,
+  laugh, rimshot, sad trombone, circus/elevator/kazoo jingles, …), or any
+  WAV/MP3/OGG on disk. Sounds mix when you mash keys. New installs include a
+  **Sounds** soundboard folder. Needs `pw-play` / `paplay` (PipeWire/Pulse) or
+  `ffplay` / `mpv`.
 - **System-monitor keys** — a key can show live **CPU, RAM, VRAM, GPU load,
   GPU/CPU temperatures, network or disk-space** readouts (like the official
   app's widgets) — or a **clock** (12h/24h, optional seconds and date) — as a
@@ -96,8 +113,11 @@ expectations:
   drop an *Open folder* action on a key, double-click it in the editor to go
   in (a **Back** key returns); folders can nest and have their own pages.
 - Three-pane configuration GUI (actions catalog · live device grid · key
-  settings) with a dark theme matching the original; optional system tray.
-- Optional headless daemon mode + systemd user service for autostart.
+  settings) with a dark theme matching the original; system tray when the
+  session exposes a StatusNotifier host.
+- Optional headless daemon mode + systemd user service for advanced autostart
+  (conflicts with the normal “Start on login” hidden-GUI path — use one or the
+  other).
 - Hotplug aware (unplug/replug re-applies the current page).
 
 ## Requirements
@@ -117,6 +137,8 @@ Optional, for specific actions (install what you use):
 | Hotkey / type text| `ydotool` (Wayland) or `xdotool` (X11) / `wtype` |
 | Open URL/file     | `xdg-open` (`xdg-utils`)                         |
 | NVIDIA VRAM key   | `python3-pynvml` (AMD needs nothing — sysfs)     |
+| OBS Studio        | OBS 28+ with WebSocket server enabled (port 4455)|
+| Play sound        | `pw-play` / `paplay`, or `ffplay` / `mpv`        |
 
 The status bar shows what was detected on your session.
 
@@ -213,15 +235,22 @@ are regenerated with `python3 tools/make_icons.py`.
 
 Run the deck automatically on login — the window starts hidden, and your keys
 are active immediately. Open the window any time by launching the app again
-(it re-uses the running instance); close it to hide back to the background.
+(it re-uses the running instance); close it to hide back to the background
+(or use the tray icon when your desktop provides one).
 
 ```bash
 fifine-control-deck --enable-autostart      # or Options -> "Start on login (hidden)"
 fifine-control-deck --disable-autostart     # turn it off
 ```
 
+Prefer enabling this from **Options** (or after installing the programs-menu
+launcher). Autostart then points at `~/.local/bin/fifine-control-deck`, which
+stays valid across AppImage rebuilds.
+
 Advanced: a headless (no-GUI) systemd **user** service is also provided in
-`packaging/fifine-deck.service` if you prefer running without any window.
+`packaging/fifine-deck.service` if you prefer running without any window. Do
+not enable it together with the XDG “Start on login” entry — both claim the
+deck and only one can run.
 
 ## Configuration
 
