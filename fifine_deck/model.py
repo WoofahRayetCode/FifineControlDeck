@@ -297,6 +297,14 @@ class DeckConfig:
     glow: bool = True          # glow a key on the device while it is pressed
     snap_hint_dismissed: bool = False   # user ticked "don't show again" on the snap USB hint
     sleep_with_screen: bool = True   # blank the deck when the screen/monitor blanks
+    show_tray: bool = True     # tray icon when a StatusNotifier host is present
+    # OBS WebSocket connection (Options → OBS settings). Password prefers the
+    # OS keyring via obs_secret_id; obs_password is the plaintext fallback when
+    # no keyring is available (same pattern as password actions).
+    obs_host: str = "127.0.0.1"
+    obs_port: int = 4455
+    obs_secret_id: str = ""
+    obs_password: str = ""
     profiles: list[Profile] = field(default_factory=lambda: [Profile()])
     active_profile_id: str = ""
 
@@ -316,15 +324,26 @@ class DeckConfig:
 
     # -- persistence -------------------------------------------------------
     def to_dict(self) -> dict:
-        return {
+        # Keep profiles near the top of the JSON so a truncated write still
+        # tends to preserve user content in the .corrupt backup.
+        d = {
             "version": self.version,
             "brightness": self.brightness,
             "glow": self.glow,
             "snap_hint_dismissed": self.snap_hint_dismissed,
             "sleep_with_screen": self.sleep_with_screen,
+            "show_tray": self.show_tray,
             "active_profile_id": self.active_profile_id,
             "profiles": [p.to_dict() for p in self.profiles],
+            "obs_host": self.obs_host,
+            "obs_port": self.obs_port,
         }
+        if self.obs_secret_id:
+            d["obs_secret_id"] = self.obs_secret_id
+        elif self.obs_password:
+            # Only persist cleartext when there is no keyring binding.
+            d["obs_password"] = self.obs_password
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "DeckConfig":
@@ -351,12 +370,23 @@ class DeckConfig:
             version = int(d.get("version", CONFIG_VERSION))
         except (TypeError, ValueError, OverflowError):
             version = CONFIG_VERSION
+        try:
+            obs_port = int(d.get("obs_port", 4455))
+            if not (1 <= obs_port <= 65535):
+                obs_port = 4455
+        except (TypeError, ValueError, OverflowError):
+            obs_port = 4455
         cfg = cls(
             version=version,
             brightness=brightness,
             glow=bool(d.get("glow", True)),
             snap_hint_dismissed=bool(d.get("snap_hint_dismissed", False)),
             sleep_with_screen=bool(d.get("sleep_with_screen", True)),
+            show_tray=bool(d.get("show_tray", True)),
+            obs_host=_as_str(d.get("obs_host"), "127.0.0.1") or "127.0.0.1",
+            obs_port=obs_port,
+            obs_secret_id=_as_str(d.get("obs_secret_id"), ""),
+            obs_password=_as_str(d.get("obs_password"), ""),
             profiles=profiles,
             active_profile_id=_as_str(d.get("active_profile_id"), ""),
         )
@@ -492,6 +522,10 @@ class DeckConfig:
         path = path or CONFIG_PATH          # resolved at call time; see save()
         if not os.path.exists(path):
             cfg = cls()
+            # Brand-new install: seed an OBS-oriented starter page (Streaming /
+            # Recording / General folders). Existing configs are never touched.
+            from .starter_layout import apply_starter_layout
+            apply_starter_layout(cfg)
             cfg.save(path)
             return cfg
         # Read and parse in SEPARATE guards. An OSError from the read (EIO on a
@@ -595,6 +629,8 @@ class DeckConfig:
                 log.warning("config at %s could not be read; it has been kept as "
                             "%s and replaced with defaults", path, corpse)
             cfg = cls()
+            from .starter_layout import apply_starter_layout
+            apply_starter_layout(cfg)
             cfg.save(path)
             return cfg
 
@@ -765,12 +801,16 @@ def iter_key_secret_ids(kc):
 def iter_config_secret_ids(config):
     """Yield every keyring secret_id referenced ANYWHERE in the config — every
     key and knob action (with their hold/multi-step sub-actions) on every page
-    of every profile, recursing into folders.
+    of every profile, recursing into folders, plus the top-level OBS WebSocket
+    password binding.
 
     Used to reap a secret the config no longer references (e.g. after a password
     key's action type is changed away). MUST be exhaustive: a missed reference
     would delete a secret still in use, which is worse than the leak it fixes.
     """
+    sid = getattr(config, "obs_secret_id", "") or ""
+    if isinstance(sid, str) and sid:
+        yield sid
     pages = []
     for prof in getattr(config, "profiles", []):
         pages.extend(getattr(prof, "pages", []))
