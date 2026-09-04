@@ -34,6 +34,9 @@ class Ctx:
     def obs_connection(self):
         self.calls.append(("obs_connection",))
         return ("127.0.0.1", 4455, "secret")
+    def sound_output(self):
+        self.calls.append(("sound_output",))
+        return ("", True)
 
 
 @pytest.fixture
@@ -49,6 +52,7 @@ def rec(monkeypatch):
 
     for name in ("_popen_detached", "_send_hotkey", "_type_text",
                  "_media", "_volume", "_close_app", "_play_sound",
+                 "_chatterino_command",
                  "_obs_scene", "_obs_transition", "_obs_source",
                  "_obs_output", "_obs_mute"):
         monkeypatch.setattr(actions, name, recorder(name))
@@ -80,6 +84,19 @@ def test_hotkey_and_text(rec):
     actions.execute(Action("text", {"text": "hello"}))
     assert rec == [("_send_hotkey", ("ctrl+shift+m",), {}),
                    ("_type_text", ("hello",), {})]
+
+
+def test_type_text_press_enter_appends_newline(rec):
+    """Chat-style send: optional Enter after the typed text."""
+    actions.execute(Action("text", {"text": "hello", "press_enter": "yes"}))
+    assert rec == [("_type_text", ("hello\n",), {})]
+
+
+def test_type_text_press_enter_defaults_off(rec):
+    actions.execute(Action("text", {"text": "hello", "press_enter": "no"}))
+    actions.execute(Action("text", {"text": "again"}))  # omitted → no Enter
+    assert rec == [("_type_text", ("hello",), {}),
+                   ("_type_text", ("again",), {})]
 
 
 def test_media_and_volume_defaults(rec):
@@ -564,18 +581,80 @@ def test_obs_actions_dispatch(rec):
 
 def test_obs_request_maps_to_websocket(monkeypatch):
     calls = []
-    monkeypatch.setattr(
-        "fifine_deck.obs_ws.call",
-        lambda host, port, password, req, data=None: (
-            calls.append((host, port, password, req, data)) or {}))
+
+    def fake_call(host, port, password, req, data=None):
+        calls.append((host, port, password, req, data))
+        if req == "GetSceneList":
+            return {"scenes": [{"sceneName": "Intro"},
+                               {"sceneName": "BRB"}]}
+        if req == "GetRecordStatus":
+            return {"outputActive": True}
+        return {}
+
+    monkeypatch.setattr("fifine_deck.obs_ws.call", fake_call)
     ctx = Ctx()
     actions._obs_scene(ctx, "Intro")
     actions._obs_output(ctx, "recording", "stop")
-    assert calls == [
-        ("127.0.0.1", 4455, "secret", "SetCurrentProgramScene",
-         {"sceneName": "Intro"}),
-        ("127.0.0.1", 4455, "secret", "StopRecord", None),
-    ]
+    assert ("127.0.0.1", 4455, "secret", "GetSceneList", None) in calls
+    assert ("127.0.0.1", 4455, "secret", "SetCurrentProgramScene",
+            {"sceneName": "Intro"}) in calls
+    assert ("127.0.0.1", 4455, "secret", "GetRecordStatus", None) in calls
+    assert ("127.0.0.1", 4455, "secret", "StopRecord", None) in calls
+
+
+def test_obs_scene_resolves_aliases_case_insensitively(monkeypatch):
+    calls = []
+
+    def fake_call(host, port, password, req, data=None):
+        calls.append((req, data))
+        if req == "GetSceneList":
+            return {"scenes": [
+                {"sceneName": "Be Right Back"},
+                {"sceneName": "Starting Soon!"},
+                {"sceneName": "Game Capture"},
+            ]}
+        return {}
+
+    monkeypatch.setattr("fifine_deck.obs_ws.call", fake_call)
+    actions._obs_scene(Ctx(), "BRB")
+    actions._obs_scene(Ctx(), "starting soon")
+    actions._obs_scene(Ctx(), "game")
+    sets = [c for c in calls if c[0] == "SetCurrentProgramScene"]
+    assert sets[0][1]["sceneName"] == "Be Right Back"
+    assert sets[1][1]["sceneName"] == "Starting Soon!"
+    assert sets[2][1]["sceneName"] == "Game Capture"
+
+
+def test_obs_start_skips_when_already_active(monkeypatch):
+    calls = []
+
+    def fake_call(host, port, password, req, data=None):
+        calls.append(req)
+        if req == "GetStreamStatus":
+            return {"outputActive": True}
+        return {}
+
+    monkeypatch.setattr("fifine_deck.obs_ws.call", fake_call)
+    actions._obs_output(Ctx(), "streaming", "start")
+    assert calls == ["GetStreamStatus"]
+    assert "StartStream" not in calls
+
+
+def test_obs_mute_resolves_mic_input(monkeypatch):
+    calls = []
+
+    def fake_call(host, port, password, req, data=None):
+        calls.append((req, data))
+        if req == "GetInputList":
+            return {"inputs": [
+                {"inputName": "Desktop Audio"},
+                {"inputName": "Mic"},
+            ]}
+        return {}
+
+    monkeypatch.setattr("fifine_deck.obs_ws.call", fake_call)
+    actions._obs_mute(Ctx(), "Mic/Aux", "toggle")
+    assert ("ToggleInputMute", {"inputName": "Mic"}) in calls
 
 
 def test_obs_blank_scene_is_noop(monkeypatch, caplog):
@@ -595,6 +674,8 @@ def test_obs_source_toggle_fetches_id_and_state(monkeypatch):
 
     def fake_call(host, port, password, req, data=None):
         calls.append((req, data))
+        if req == "GetSceneList":
+            return {"scenes": [{"sceneName": "Main"}]}
         if req == "GetSceneItemId":
             return {"sceneItemId": 7}
         if req == "GetSceneItemEnabled":
@@ -604,6 +685,7 @@ def test_obs_source_toggle_fetches_id_and_state(monkeypatch):
     monkeypatch.setattr("fifine_deck.obs_ws.call", fake_call)
     actions._obs_source(Ctx(), "Main", "Cam", "toggle")
     assert calls == [
+        ("GetSceneList", None),
         ("GetSceneItemId", {"sceneName": "Main", "sourceName": "Cam"}),
         ("GetSceneItemEnabled", {"sceneName": "Main", "sceneItemId": 7}),
         ("SetSceneItemEnabled",
@@ -613,8 +695,59 @@ def test_obs_source_toggle_fetches_id_and_state(monkeypatch):
 
 def test_play_sound_dispatches(rec):
     actions.execute(Action("play_sound", {
-        "clip": "bleep", "file": "", "volume": "70"}))
-    assert rec == [("_play_sound", ("bleep", "", "70"), {})]
+        "clip": "bruh", "file": "", "volume": "70"}))
+    assert len(rec) == 1
+    assert rec[0][0] == "_play_sound"
+    assert rec[0][1][:3] == ("bruh", "", "70")
+
+
+def test_play_sound_uses_context_sink(monkeypatch):
+    seen = {}
+
+    class SCtx(Ctx):
+        def sound_output(self):
+            return ("easyeffects_sink", True)
+
+    def fake_play(clip, file_path="", volume=80, sink="", also_default=True):
+        seen.update(clip=clip, sink=sink, also_default=also_default,
+                    volume=volume)
+        return True
+
+    monkeypatch.setattr("fifine_deck.sounds.play", fake_play)
+    actions._play_sound("bruh", "", "80", SCtx())
+    assert seen["sink"] == "easyeffects_sink"
+    assert seen["also_default"] is True
+
+
+def test_chatterino_clip_dispatches(rec):
+    actions.execute(Action("chatterino", {
+        "command": "/clip", "window": "chatterino"}))
+    assert rec == [("_chatterino_command", ("/clip", "chatterino"), {})]
+
+
+def test_chatterino_command_focuses_and_types(monkeypatch):
+    calls = []
+    monkeypatch.setattr(actions, "KEY_TOOL", "xdotool")
+    monkeypatch.setattr(actions, "_focus_app_window",
+                        lambda hint: calls.append(("focus", hint)) or True)
+    monkeypatch.setattr(actions, "_type_text",
+                        lambda text: calls.append(("type", text)))
+    monkeypatch.setattr(actions.time, "sleep", lambda *_: None)
+    actions._chatterino_command("/clip", "chatterino")
+    assert calls == [("focus", "chatterino"), ("type", "/clip\n")]
+
+
+def test_chatterino_command_adds_slash_and_skips_without_window(monkeypatch, caplog):
+    import logging
+    typed = []
+    monkeypatch.setattr(actions, "KEY_TOOL", "xdotool")
+    monkeypatch.setattr(actions, "_focus_app_window", lambda hint: False)
+    monkeypatch.setattr(actions, "_type_text",
+                        lambda text: typed.append(text))
+    with caplog.at_level(logging.WARNING, logger="fifine_deck.actions"):
+        actions._chatterino_command("clip", "chatterino")
+    assert typed == []
+    assert any("not found" in r.message for r in caplog.records)
 
 
 def test_obs_helpers_never_raise_when_ws_fails(monkeypatch):
