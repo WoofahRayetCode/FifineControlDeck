@@ -47,6 +47,262 @@ def _hex(color: str, fallback=(16, 16, 32)):
         return fallback
 
 
+def chat_body_metrics(size: int, text: str = "", *, header: bool = False
+                      ) -> tuple[int, int, int]:
+    """Return ``(text_width, view_width, font_size)`` for chat body layout.
+
+    Used by the controller to decide whether a tile needs marquee scrolling.
+    """
+    pad = max(2, size // 20)
+    max_w = size - 2 * pad
+    body = " ".join((text or "").split())
+    body_font = _font(max(8, size // 9))
+    # textlength is exact for a single line; empty body is zero.
+    try:
+        width = int(ImageDraw.Draw(Image.new("RGB", (1, 1)))
+                    .textlength(body, font=body_font)) if body else 0
+    except Exception:
+        width = len(body) * max(5, size // 12)
+    return width, max_w, max(8, size // 9)
+
+
+def render_chat_tile(
+    size: int,
+    user: str = "",
+    text: str = "",
+    user_color: str = "#9147ff",
+    bg_color: str = "#0e0e10",
+    header: str = "",
+    scroll_px: int = 0,
+) -> Image.Image:
+    """Compact chat line for one physical key (Twitch chat page mode).
+
+    When the body is wider than the chip, ``scroll_px`` advances a horizontal
+    marquee so the full message can be read over time.
+    """
+    img = Image.new("RGB", (size, size), _hex(bg_color, (14, 14, 16)))
+    draw = ImageDraw.Draw(img)
+    pad = max(2, size // 20)
+    max_w = size - 2 * pad
+
+    if header:
+        font = _font(max(9, size // 7))
+        draw.text((pad, pad), header[:18], fill=(145, 71, 255), font=font)
+        body_top = pad + int(size * 0.28)
+        body = " ".join((text or "waiting for chat…").split())
+        body_font = _font(max(8, size // 9))
+        try:
+            body_w = int(draw.textlength(body, font=body_font)) if body else 0
+        except Exception:
+            body_w = 0
+        if body_w > max_w:
+            _paste_marquee(img, body, body_font, (230, 230, 230),
+                           pad, body_top, max_w, scroll_px)
+        else:
+            lines = _wrap(draw, body, body_font, max_w)
+            line_h = max(10, size // 9 + 2)
+            for i, line in enumerate(lines):
+                draw.text((pad, body_top + i * line_h), line,
+                          fill=(230, 230, 230), font=body_font)
+        return img
+
+    name = " ".join((user or "").split())[:16]
+    body = " ".join((text or "").split())
+    name_font = _font(max(8, size // 8))
+    body_font = _font(max(8, size // 9))
+    draw.text((pad, pad), name or "…", fill=_hex(user_color, (145, 71, 255)),
+              font=name_font)
+    name_h = int(size * 0.28)
+    body_y = pad + name_h
+    try:
+        body_w = int(draw.textlength(body, font=body_font)) if body else 0
+    except Exception:
+        body_w = 0
+    if body and body_w > max_w:
+        _paste_marquee(img, body, body_font, (235, 235, 235),
+                       pad, body_y, max_w, scroll_px)
+    elif body:
+        lines = _wrap(draw, body, body_font, max_w)
+        line_h = max(10, size // 9 + 2)
+        for i, line in enumerate(lines):
+            draw.text((pad, body_y + i * line_h), line,
+                      fill=(235, 235, 235), font=body_font)
+    return img
+
+
+def _cover_crop_rgb(src: Image.Image, width: int, height: int) -> Image.Image | None:
+    """Scale ``src`` to cover ``width``×``height`` and center-crop."""
+    if width <= 0 or height <= 0:
+        return src.convert("RGB") if src.mode != "RGB" else src
+    rgb = src.convert("RGB")
+    sw, sh = rgb.size
+    if sw <= 0 or sh <= 0:
+        return None
+    scale = max(width / sw, height / sh)
+    nw = max(1, int(round(sw * scale)))
+    nh = max(1, int(round(sh * scale)))
+    resized = rgb.resize((nw, nh), Image.Resampling.LANCZOS)
+    left = max(0, (nw - width) // 2)
+    top = max(0, (nh - height) // 2)
+    return resized.crop((left, top, left + width, top + height))
+
+
+def _slice_canvas(canvas: Image.Image, cols: int, rows: int,
+                  key_size: int) -> dict[int, Image.Image]:
+    tiles: dict[int, Image.Image] = {}
+    for r in range(rows):
+        for c in range(cols):
+            idx = r * cols + c + 1
+            left = c * key_size
+            top = r * key_size
+            tiles[idx] = canvas.crop(
+                (left, top, left + key_size, top + key_size))
+    return tiles
+
+
+def load_photo_cover(path: str, width: int, height: int) -> Image.Image | None:
+    """Load ``path`` and return an RGB image cover-cropped to ``width``×``height``.
+
+    Returns None if the file is missing or undecodable. Animated images use
+    the first frame only — see :func:`load_page_gif_animation` for playback.
+    """
+    path = os.path.expanduser((path or "").strip())
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        src = Image.open(path)
+        src.seek(0)
+    except Exception as e:
+        log.warning("photo %s could not be decoded: %s", path, e)
+        return None
+    return _cover_crop_rgb(src, width, height)
+
+
+def slice_photo_tiles(
+    path: str,
+    cols: int,
+    rows: int,
+    key_size: int,
+) -> dict[int, Image.Image]:
+    """Split a photo into a ``cols``×``rows`` grid of ``key_size`` tiles.
+
+    Keys are numbered 1..cols*rows in reading order (left→right, top→bottom),
+    matching the GUI key grid. Returns an empty dict on failure.
+    """
+    cols = max(1, int(cols))
+    rows = max(1, int(rows))
+    key_size = max(1, int(key_size))
+    canvas = load_photo_cover(path, cols * key_size, rows * key_size)
+    if canvas is None:
+        return {}
+    return _slice_canvas(canvas, cols, rows, key_size)
+
+
+def load_page_gif_animation(
+    path: str,
+    cols: int,
+    rows: int,
+    key_size: int,
+) -> list[tuple[dict[int, Image.Image], int]]:
+    """Decode an animated GIF/WebP into per-frame key tile maps.
+
+    Returns a list of ``(tiles, delay_ms)``. Empty on failure. A still image
+    (or single-frame GIF) returns one entry — callers may treat that as static.
+    """
+    from PIL import ImageSequence
+
+    path = os.path.expanduser((path or "").strip())
+    if not path or not os.path.isfile(path):
+        return []
+    cols = max(1, int(cols))
+    rows = max(1, int(rows))
+    key_size = max(1, int(key_size))
+    canvas_w, canvas_h = cols * key_size, rows * key_size
+
+    try:
+        im = Image.open(path)
+    except Exception as e:
+        log.warning("gif/page image %s could not be opened: %s", path, e)
+        return []
+
+    n_frames = int(getattr(im, "n_frames", 1) or 1)
+    # Composite frames so GIF disposal / partial updates look correct.
+    canvas = Image.new("RGBA", im.size, (0, 0, 0, 0))
+    out: list[tuple[dict[int, Image.Image], int]] = []
+    try:
+        for frame in ImageSequence.Iterator(im):
+            delay = int(frame.info.get("duration", 100) or 100)
+            delay = max(40, min(delay, 5000))
+            fr = frame.convert("RGBA")
+            disposal = frame.info.get("disposal", 1)
+            try:
+                disposal = int(disposal)
+            except (TypeError, ValueError):
+                disposal = 1
+            if disposal == 2:
+                canvas = Image.new("RGBA", im.size, (0, 0, 0, 0))
+            # Most GIF frames are full-canvas after convert; paste with alpha.
+            canvas.paste(fr, (0, 0), fr)
+            covered = _cover_crop_rgb(canvas, canvas_w, canvas_h)
+            if covered is None:
+                continue
+            out.append((_slice_canvas(covered, cols, rows, key_size), delay))
+    except Exception as e:
+        log.warning("gif/page image %s decode failed: %s", path, e)
+        return []
+
+    if not out and n_frames >= 1:
+        tiles = slice_photo_tiles(path, cols, rows, key_size)
+        if tiles:
+            return [(tiles, 100)]
+    return out
+
+
+def badge_photo_back_tile(tile: Image.Image) -> Image.Image:
+    """Draw a small double-tap-back hint on the top-left photo tile."""
+    img = tile.convert("RGB").copy()
+    draw = ImageDraw.Draw(img)
+    size = img.size[0]
+    pad = max(2, size // 16)
+    font = _font(max(8, size // 8))
+    label = "2× ←"
+    # Dark pill behind the hint for contrast on any photo.
+    bb = draw.textbbox((0, 0), label, font=font)
+    tw, th = bb[2] - bb[0], bb[3] - bb[1]
+    box = (pad - 2, pad - 2, pad + tw + 4, pad + th + 4)
+    draw.rectangle(box, fill=(0, 0, 0))
+    draw.text((pad, pad), label, fill=(255, 255, 255), font=font)
+    return img
+
+
+def _paste_marquee(img: Image.Image, text: str, font, color, x0: int, y: int,
+                   view_w: int, scroll_px: int) -> None:
+    """Blit a looping horizontal marquee of ``text`` into ``img`` at (x0, y)."""
+    draw = ImageDraw.Draw(img)
+    try:
+        text_w = int(draw.textlength(text, font=font))
+    except Exception:
+        text_w = len(text) * 6
+    if text_w <= view_w:
+        draw.text((x0, y), text, fill=color, font=font)
+        return
+    gap = max(view_w // 3, 16)
+    period = text_w + gap
+    offset = int(scroll_px) % period if period else 0
+    # Font pixel size is a reasonable strip height.
+    try:
+        ascent, descent = font.getmetrics()
+        strip_h = max(ascent + descent + 2, getattr(font, "size", 12) + 4)
+    except Exception:
+        strip_h = getattr(font, "size", 12) + 4
+    strip = Image.new("RGB", (period + view_w + 2, strip_h), img.getpixel((0, 0)))
+    sdraw = ImageDraw.Draw(strip)
+    sdraw.text((0, 0), text, fill=color, font=font)
+    sdraw.text((period, 0), text, fill=color, font=font)
+    window = strip.crop((offset, 0, offset + view_w, strip_h))
+    img.paste(window, (x0, y))
+
+
 def render_key(
     size: int,
     label: str = "",
