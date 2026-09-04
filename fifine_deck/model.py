@@ -298,6 +298,11 @@ class DeckConfig:
     snap_hint_dismissed: bool = False   # user ticked "don't show again" on the snap USB hint
     sleep_with_screen: bool = True   # blank the deck when the screen/monitor blanks
     show_tray: bool = True     # tray icon when a StatusNotifier host is present
+    # Soundboard playback sink (Options → Soundboard audio). Empty = system
+    # default. When set, clips play to that PipeWire/Pulse sink so OBS can
+    # capture them; sound_also_default dual-plays to headphones as well.
+    sound_sink: str = ""
+    sound_also_default: bool = True
     # OBS WebSocket connection (Options → OBS settings). Password prefers the
     # OS keyring via obs_secret_id; obs_password is the plaintext fallback when
     # no keyring is available (same pattern as password actions).
@@ -305,6 +310,12 @@ class DeckConfig:
     obs_port: int = 4455
     obs_secret_id: str = ""
     obs_password: str = ""
+    # Twitch Helix (Options → Twitch settings). Client Secret prefers the OS
+    # keyring via twitch_secret_id; twitch_client_secret is the plaintext
+    # fallback when no keyring is available (same pattern as OBS password).
+    twitch_client_id: str = ""
+    twitch_secret_id: str = ""
+    twitch_client_secret: str = ""
     profiles: list[Profile] = field(default_factory=lambda: [Profile()])
     active_profile_id: str = ""
 
@@ -333,16 +344,23 @@ class DeckConfig:
             "snap_hint_dismissed": self.snap_hint_dismissed,
             "sleep_with_screen": self.sleep_with_screen,
             "show_tray": self.show_tray,
+            "sound_sink": self.sound_sink,
+            "sound_also_default": self.sound_also_default,
             "active_profile_id": self.active_profile_id,
             "profiles": [p.to_dict() for p in self.profiles],
             "obs_host": self.obs_host,
             "obs_port": self.obs_port,
+            "twitch_client_id": self.twitch_client_id,
         }
         if self.obs_secret_id:
             d["obs_secret_id"] = self.obs_secret_id
         elif self.obs_password:
             # Only persist cleartext when there is no keyring binding.
             d["obs_password"] = self.obs_password
+        if self.twitch_secret_id:
+            d["twitch_secret_id"] = self.twitch_secret_id
+        elif self.twitch_client_secret:
+            d["twitch_client_secret"] = self.twitch_client_secret
         return d
 
     @classmethod
@@ -383,10 +401,15 @@ class DeckConfig:
             snap_hint_dismissed=bool(d.get("snap_hint_dismissed", False)),
             sleep_with_screen=bool(d.get("sleep_with_screen", True)),
             show_tray=bool(d.get("show_tray", True)),
+            sound_sink=_as_str(d.get("sound_sink"), ""),
+            sound_also_default=bool(d.get("sound_also_default", True)),
             obs_host=_as_str(d.get("obs_host"), "127.0.0.1") or "127.0.0.1",
             obs_port=obs_port,
             obs_secret_id=_as_str(d.get("obs_secret_id"), ""),
             obs_password=_as_str(d.get("obs_password"), ""),
+            twitch_client_id=_as_str(d.get("twitch_client_id"), ""),
+            twitch_secret_id=_as_str(d.get("twitch_secret_id"), ""),
+            twitch_client_secret=_as_str(d.get("twitch_client_secret"), ""),
             profiles=profiles,
             active_profile_id=_as_str(d.get("active_profile_id"), ""),
         )
@@ -802,15 +825,16 @@ def iter_config_secret_ids(config):
     """Yield every keyring secret_id referenced ANYWHERE in the config — every
     key and knob action (with their hold/multi-step sub-actions) on every page
     of every profile, recursing into folders, plus the top-level OBS WebSocket
-    password binding.
+    password and Twitch Client Secret bindings.
 
     Used to reap a secret the config no longer references (e.g. after a password
     key's action type is changed away). MUST be exhaustive: a missed reference
     would delete a secret still in use, which is worse than the leak it fixes.
     """
-    sid = getattr(config, "obs_secret_id", "") or ""
-    if isinstance(sid, str) and sid:
-        yield sid
+    for attr in ("obs_secret_id", "twitch_secret_id"):
+        sid = getattr(config, attr, "") or ""
+        if isinstance(sid, str) and sid:
+            yield sid
     pages = []
     for prof in getattr(config, "profiles", []):
         pages.extend(getattr(prof, "pages", []))
