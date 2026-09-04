@@ -3,14 +3,43 @@
 Applied only when DeckConfig.load() creates a fresh config (missing or
 unreadable file). Existing user configs are never rewritten.
 
-Includes OBS control folders plus a comedy soundboard (bleeps, farts,
-unfitting jingles) for the Play sound action.
+Includes OBS control folders plus a multi-page Memes folder of MyInstants
+sound bites.
 """
 from __future__ import annotations
 
 from . import assets
 from .device import DEVICE_PROFILE
 from .model import Action, DeckConfig, Folder, KeyConfig, Page
+
+# Short key labels for the Memes folder (clip id, label).
+_MEME_CLIPS: list[tuple[str, str]] = [
+    ("vine_boom", "Boom"),
+    ("wtf_boom", "WTF!"),
+    ("wrong_answer_buzzer", "Wrong"),
+    ("win_xp_error", "XP Err"),
+    ("taco_bell_bong", "Taco"),
+    ("bruh", "Bruh"),
+    ("roblox_oof", "Oof"),
+    ("multi_yeet", "Yeet"),
+    ("gawd_dayum", "Dayum"),
+    ("oh_my_god", "OMG"),
+    ("huh_cat", "Huh?"),
+    ("goofy_slip", "Slip"),
+    ("spongebob_fail", "SB Fail"),
+    ("gta_wasted", "Wasted"),
+    ("tf2_scout_scream", "Scout"),
+    ("faaah", "FAAAH"),
+    ("fast_clapping", "Clap"),
+    ("zelda_hey_listen", "Listen"),
+    ("bark_fart", "Bark"),
+    ("brain_fart", "Brain"),
+    ("dexter_theme", "Dexter"),
+    ("mii_channel_music", "Mii"),
+    ("tiktok_india", "TikTok"),
+    ("zelda_item_get", "Item!"),
+    ("sonic_rings_falling", "Rings"),
+]
 
 
 def _key(label: str, icon: str, action: Action, *,
@@ -39,6 +68,79 @@ def _back_key() -> KeyConfig:
     )
 
 
+# Fixed slots for page navigation (15-key deck: clips 1–12, nav 13–14, Back 15).
+PAGE_NAV_PREV_SLOT = 13
+PAGE_NAV_NEXT_SLOT = 14
+
+
+def _page_nav_key(kind: str) -> KeyConfig:
+    if kind == "prev":
+        return _key("Prev", "prev_page", Action("prev_page", {}), bg="#203040")
+    return _key("Next", "next_page", Action("next_page", {}), bg="#203040")
+
+
+def _is_page_nav_slot(kc: KeyConfig | None, kind: str) -> bool:
+    """True if the slot is empty or already the matching Prev/Next action."""
+    if kc is None or kc.is_empty():
+        return True
+    want = "prev_page" if kind == "prev" else "next_page"
+    return kc.action.type == want
+
+
+def apply_page_nav_keys(pages: list[Page], *, in_folder: bool = False) -> None:
+    """Place page-nav chips by position.
+
+    Profile (root) pages: first gets Next, last gets Prev, middle get both.
+    Folder pages: only Next on non-last pages — never Prev. The folder's Back
+    key is smart (previous page, or exit on page 1), so a separate Prev would
+    double up with Back. Single-page boards get neither.
+
+    Only empty slots or slots that already hold the matching nav action are
+    written; other user keys on 13/14 are left alone. Leftover folder Prev
+    chips are cleared when ``in_folder`` is True.
+    """
+    n = len(pages)
+    for i, page in enumerate(pages):
+        if in_folder:
+            want_prev = False
+            want_next = n > 1 and i < n - 1
+        else:
+            want_prev = n > 1 and i > 0
+            want_next = n > 1 and i < n - 1
+        _apply_nav_slot(page, PAGE_NAV_PREV_SLOT, "prev", want_prev)
+        _apply_nav_slot(page, PAGE_NAV_NEXT_SLOT, "next", want_next)
+
+
+def _apply_nav_slot(page: Page, slot: int, kind: str, want: bool) -> None:
+    existing = page.keys.get(slot)
+    if want:
+        if not _is_page_nav_slot(existing, kind):
+            return
+        page.keys[slot] = _page_nav_key(kind)
+        return
+    # Remove a leftover auto-nav chip when this side shouldn't exist.
+    if existing is not None and _is_page_nav_slot(existing, kind) \
+            and not existing.is_empty():
+        page.keys[slot] = KeyConfig()
+
+
+def apply_page_nav_everywhere(cfg: DeckConfig) -> None:
+    """Ensure page-nav chips on every multi-page profile and nested folder."""
+    for profile in cfg.profiles:
+        apply_page_nav_keys(profile.pages)
+        for page in profile.pages:
+            _apply_page_nav_in_page_tree(page)
+
+
+def _apply_page_nav_in_page_tree(page: Page) -> None:
+    for kc in page.keys.values():
+        if kc.folder is None:
+            continue
+        apply_page_nav_keys(kc.folder.pages, in_folder=True)
+        for nested in kc.folder.pages:
+            _apply_page_nav_in_page_tree(nested)
+
+
 def _folder(name: str, icon: str, entries: list[tuple[int, KeyConfig]],
             *, bg: str = "#152035") -> KeyConfig:
     """Build an open_folder key whose first page holds `entries` + a Back key."""
@@ -56,6 +158,55 @@ def _folder(name: str, icon: str, entries: list[tuple[int, KeyConfig]],
     )
 
 
+def build_soundboard_folder(
+        clips: list[tuple[str, str]] | None = None,
+        *,
+        name: str = "Memes",
+) -> KeyConfig:
+    """Multi-page folder of play-sound keys.
+
+    ``clips`` is [(clip_id, short_label), ...]. When omitted, every bundled
+    clip from assets/sounds is included (Soundboard “All sounds folder” chip).
+    Layout per page: keys 1–12 clips, 13/14 Prev/Next by position, 15 Back.
+    """
+    if clips is None:
+        from . import sounds
+        clips = []
+        for c in sounds.list_clips():
+            if not c.get("path"):
+                continue
+            label = (c.get("label") or c["name"]).strip()
+            if " (" in label:
+                label = label.split(" (", 1)[0].strip() or c["name"]
+            clips.append((c["name"], label))
+    last = int(DEVICE_PROFILE.get("key_count", 15) or 15)
+    per_page = 12
+    pages: list[Page] = []
+    for page_i in range(0, len(clips), per_page):
+        chunk = clips[page_i:page_i + per_page]
+        page = Page(name=f"{name} {page_i // per_page + 1}")
+        for slot, (clip, label) in enumerate(chunk, start=1):
+            page.keys[slot] = _snd(label, clip, bg="#402028")
+        page.keys[last] = _back_key()
+        pages.append(page)
+    if not pages:
+        pages = [Page(name=f"{name} 1")]
+        pages[0].keys[last] = _back_key()
+    apply_page_nav_keys(pages, in_folder=True)
+    return KeyConfig(
+        label=name,
+        icon=assets.library_ref("star"),
+        bg_color="#3a1840",
+        action=Action("open_folder", {}),
+        folder=Folder(name=name, pages=pages),
+    )
+
+
+def _memes_folder() -> KeyConfig:
+    """Starter Memes folder (curated clip order and short labels)."""
+    return build_soundboard_folder(list(_MEME_CLIPS), name="Memes")
+
+
 def apply_starter_layout(cfg: DeckConfig) -> None:
     """Fill the active profile's first page with Streaming / Recording / General.
 
@@ -69,23 +220,35 @@ def apply_starter_layout(cfg: DeckConfig) -> None:
         cfg.profiles[0].pages = [page]
 
     streaming = _folder("Streaming", "web", [
-        (1, _key("Start", "play", Action("obs_streaming", {"cmd": "start"}),
+        (1, _key("Go Live", "play", Action("obs_streaming", {"cmd": "start"}),
                  bg="#0d3320")),
-        (2, _key("Stop", "stop", Action("obs_streaming", {"cmd": "stop"}),
+        (2, _key("End Live", "stop", Action("obs_streaming", {"cmd": "stop"}),
                  bg="#3a1515")),
         (3, _key("Toggle", "web", Action("obs_streaming", {"cmd": "toggle"}))),
     ], bg="#0d2840")
 
     recording = _folder("Recording", "stop", [
-        (1, _key("Start", "play", Action("obs_recording", {"cmd": "start"}),
+        (1, _key("Record", "play", Action("obs_recording", {"cmd": "start"}),
                  bg="#0d3320")),
-        (2, _key("Stop", "stop", Action("obs_recording", {"cmd": "stop"}),
+        (2, _key("Stop Rec", "stop", Action("obs_recording", {"cmd": "stop"}),
                  bg="#3a1515")),
         (3, _key("Toggle", "camera",
                  Action("obs_recording", {"cmd": "toggle"}))),
     ], bg="#401010")
 
-    # Stream+Record and Stop All as multi-actions.
+    scenes = _folder("Scenes", "camera", [
+        (1, _key("Soon", "dot",
+                 Action("obs_scene", {"scene": "Starting Soon"}),
+                 bg="#2a2035")),
+        (2, _key("BRB", "dot",
+                 Action("obs_scene", {"scene": "BRB"}), bg="#352820")),
+        (3, _key("Live", "camera",
+                 Action("obs_scene", {"scene": "Live"}), bg="#0d2840")),
+        (4, _key("Game", "star",
+                 Action("obs_scene", {"scene": "Game Capture"}),
+                 bg="#152035")),
+    ], bg="#1a2030")
+
     stream_and_record = Action("multi", {"steps": [
         {"action": Action("obs_streaming", {"cmd": "start"}).to_dict(),
          "delay": 0.2},
@@ -102,40 +265,25 @@ def apply_starter_layout(cfg: DeckConfig) -> None:
     general = _folder("General", "folder", [
         (1, _key("Mic Mute", "mute",
                  Action("obs_mute", {"input": "Mic/Aux", "state": "toggle"}))),
-        (2, _key("Stream", "web",
-                 Action("obs_streaming", {"cmd": "toggle"}))),
+        (2, _key("Go Live", "web",
+                 Action("obs_streaming", {"cmd": "start"}), bg="#0d3320")),
         (3, _key("Record", "camera",
-                 Action("obs_recording", {"cmd": "toggle"}))),
-        (4, _key("Stream+Rec", "star", stream_and_record, bg="#152035")),
+                 Action("obs_recording", {"cmd": "start"}))),
+        (4, _key("Live+Rec", "star", stream_and_record, bg="#152035")),
         (5, _key("Stop All", "power", stop_all, bg="#3a1515")),
-        (6, _key("Scene Live", "camera",
-                 Action("obs_scene", {"scene": "Live"}))),
-        (7, _key("Scene BRB", "dot",
-                 Action("obs_scene", {"scene": "BRB"}))),
+        (6, _key("Clip", "camera",
+                 Action("chatterino",
+                        {"command": "/clip", "window": "chatterino"}),
+                 bg="#3a1840")),
     ], bg="#203015")
 
-    # Comedy soundboard — bleeps, farts, and deliberately unfitting jingles.
-    # Overlapping presses mix (each play is a separate player process).
-    sounds = _folder("Sounds", "play", [
-        (1, _snd("Bleep", "bleep", icon="mute", bg="#203040")),
-        (2, _snd("Airhorn", "airhorn", bg="#402010")),
-        (3, _snd("Squeak", "fart_squeak", bg="#302018")),
-        (4, _snd("Wet", "fart_wet", bg="#302018")),
-        (5, _snd("Trumpet", "fart_trumpet", bg="#302018")),
-        (6, _snd("Laugh", "laugh")),
-        (7, _snd("Rimshot", "rimshot")),
-        (8, _snd("Wah-wah", "sad_trombone")),
-        (9, _snd("Boing", "boing")),
-        (10, _snd("Slide", "slide_down")),
-        (11, _snd("Circus", "circus", bg="#203018")),
-        (12, _snd("Elevator", "elevator", bg="#203018")),
-        (13, _snd("Kazoo", "kazoo", bg="#203018")),
-        (14, _snd("Random!", "random_funny", icon="star", bg="#3a2040")),
-    ], bg="#2a1840")
+    memes = _memes_folder()
 
     page.keys[1] = streaming
     page.keys[2] = recording
-    page.keys[3] = general
-    page.keys[4] = sounds
-    page.keys[5] = _snd("Fart?", "random_fart", icon="star", bg="#302018")
-    page.keys[6] = _snd("Jingle?", "random_music", icon="play", bg="#203018")
+    page.keys[3] = scenes
+    page.keys[4] = general
+    page.keys[5] = memes
+    page.keys[6] = _snd("Random!", "random_funny", icon="star", bg="#3a2040")
+    page.keys[7] = _snd("Fart?", "random_fart", icon="star", bg="#302018")
+    page.keys[8] = _snd("Jingle?", "random_music", icon="play", bg="#203018")
