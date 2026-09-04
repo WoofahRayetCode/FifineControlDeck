@@ -70,7 +70,9 @@ expectations:
   key (auto-assigns a matching icon + label).
 - Actions (modeled on the original): launch app, run shell command, open
   URL/file, close application, send hotkey, type text, type password, media
-  control, volume up/down/mute, brightness, sleep screen, page next/prev/goto,
+  control, volume up/down/mute, brightness, sleep screen, KDE/power-profiles
+  Performance / Balanced / Power Saver chips, **Sleep** / **Hibernate** /
+  **Shutdown** (system power via `loginctl`/`systemctl`), page next/prev/goto,
   switch profile, next/previous profile (Scene Shift), and multi-step actions.
   Key actions run on a worker thread, so a slow/delayed macro never blocks the
   keypad. Every key can also carry a **hold action** — a second action that
@@ -78,12 +80,24 @@ expectations:
 - **OBS Studio** (obs-websocket v5, OBS 28+): switch scenes, show/hide sources,
   start/stop/toggle recording and streaming, mute inputs, and fire a studio-mode
   transition. The **OBS** sidebar has chips for **Go Live**, **End Stream**,
-  **Record**, **Starting Soon**, **BRB**, **Live**, **Game Capture**, and
-  **Mic Mute**. Scene/mic names are matched flexibly against OBS (so `BRB`
-  still hits “Be Right Back”). Configure the connection under **Options → OBS
-  settings…**. Enable the server in OBS under *Tools → WebSocket Server
-  Settings* (default port 4455). New installs ship **Streaming**, **Recording**,
-  **Scenes**, and **General** folders already set up.
+  **Record**, **Starting Soon**, **BRB**, **Live**, **Game Capture**,
+  **BRB Source**, and **Mic Mute**. Scene/mic/source names are matched flexibly
+  against a live OBS websocket (so `BRB` still hits “Be Right Back”, Mic Mute
+  prefers OBS’s special mic input, and dropping a chip autofills the real
+  name). The action editor also offers editable dropdowns of scenes, inputs,
+  and sources pulled from OBS (↻ refreshes, or press **Detect**). When the
+  websocket is up, opening an OBS chip resolves placeholders like `Mic/Aux`
+  / `BRB` to the real names and lists every live scene, input, and source in
+  the dropdowns (with a connected status line). Configure the connection under
+  **Options → OBS settings…**. Enable the server in OBS under *Tools →
+  WebSocket Server Settings* (default port 4455). While Fifine is running it
+  keeps a live websocket session so it appears in that dialog’s session
+  table. New installs ship **Streaming**, **Recording**, **Scenes**, and
+  **General** folders already set up.
+- **Twitch chat chip** — drag **Twitch chat** from the sidebar to open the
+  chat screen (creates a Twitch chat page if you do not have one yet). Optional
+  channel field on the chip; double-press the top-left key (or ← Chips) to
+  return to keys.
 - **Twitch clip via Chatterino** — the **Create clip** chip focuses Chatterino
   and runs `/clip` (Twitch clip of the current channel). Keep Chatterino open
   on your stream channel; needs `ydotool`, `wtype`, or `xdotool`.
@@ -111,8 +125,13 @@ expectations:
   default; the target field selects a disk mount, network iface, `psutil` temp
   sensor (`chip` / `chip:label`, e.g. `nvme:Composite`), a process name for
   **process RAM** (`procram`), or a Twitch login for **`twitchviewers`** /
-  **`twitchuptime`**. Twitch needs **Options → Twitch settings…** (Client-ID +
-  Client Secret from [dev.twitch.tv/console](https://dev.twitch.tv/console)).
+  **`twitchuptime`**. **`twitchad`** shows a countdown to the next Ads Manager
+  mid-roll (`Ad 4:32` / `NOW`); drag **Twitch ad countdown** from the Twitch
+  sidebar, and use **Snooze ad** to push the break back (~5 minutes). Twitch
+  needs **Options → Twitch settings…** (Client-ID + Client Secret from
+  [dev.twitch.tv/console](https://dev.twitch.tv/console)); ads also need
+  **Log in with Twitch** (device-code flow at twitch.tv/activate — no
+  localhost redirect) with `channel:read:ads` / `channel:manage:ads`.
   CPU power uses RAPL; GPU power uses NVML or AMD hwmon. VRAM and GPU load are
   best-effort per GPU vendor (NVIDIA via NVML — needs `python3-pynvml`; AMD via
   sysfs). On hybrid NVIDIA+AMD machines, dedicated **iGPU usage / VRAM /
@@ -124,6 +143,16 @@ expectations:
   into a key. Community recipes live in [`contrib/`](contrib/), including
   [offline voice dictation on a key](contrib/dictation/) (press, speak in
   English or French, press — your words type themselves).
+- **Twitch chat pages** — set **Page mode** to **Twitch chat** and enter a
+  channel login to fill that entire page with live chat (full panel in the
+  window + the same feed on the deck keys). **Double-press the top-left key**
+  (or ← Chips in the window) to jump back to a normal chip/keys page.
+  Anonymous read-only IRC; no extra Twitch OAuth beyond what monitor keys
+  already use for viewers/uptime.
+- **Photo / GIF pages** — set **Page mode** to **Photo / GIF** and pick a
+  still image or animated GIF; it is cover-cropped and tiled across every
+  deck key (GIFs play on the keys and in the window). Same double-tap /
+  ← Chips to return to chip pages.
 - Multiple **profiles**, each with multiple **pages**, plus **folders** —
   drop an *Open folder* action on a key, drag other keys (including sound
   clips) onto a folder to move them inside, double-click it in the editor to go
