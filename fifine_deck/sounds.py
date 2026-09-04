@@ -120,27 +120,118 @@ def resolve_clip(clip: str, file_path: str = "") -> Optional[str]:
     return None
 
 
-def _player_cmd(path: str, volume_pct: int) -> Optional[list[str]]:
-    """Build a detached player argv. Overlapping plays = multiple processes."""
+def list_sinks() -> list[tuple[str, str]]:
+    """Return [(sink_name, description), ...] from Pulse/PipeWire.
+
+    Empty on failure. Names are what ``pw-play --target`` / ``paplay --device``
+    accept (e.g. ``easyeffects_sink``, ``alsa_output.…``).
+    """
+    if shutil.which("pactl"):
+        try:
+            raw = subprocess.check_output(
+                ["pactl", "-f", "json", "list", "sinks"],
+                stderr=subprocess.DEVNULL, timeout=5, text=True)
+            data = json.loads(raw)
+            out: list[tuple[str, str]] = []
+            if isinstance(data, list):
+                for s in data:
+                    if not isinstance(s, dict):
+                        continue
+                    name = str(s.get("name") or "").strip()
+                    if not name:
+                        continue
+                    desc = (str(s.get("description") or "").strip()
+                            or str((s.get("properties") or {})
+                                   .get("node.description") or "").strip()
+                            or name)
+                    out.append((name, desc))
+            if out:
+                return out
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError,
+                TypeError, ValueError):
+            pass
+        # Fallback: short listing (id name driver …).
+        try:
+            raw = subprocess.check_output(
+                ["pactl", "list", "short", "sinks"],
+                stderr=subprocess.DEVNULL, timeout=5, text=True)
+            out = []
+            for line in raw.splitlines():
+                parts = line.split("\t")
+                if len(parts) >= 2 and parts[1].strip():
+                    name = parts[1].strip()
+                    out.append((name, name))
+            return out
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return []
+
+
+def _player_cmd(path: str, volume_pct: int,
+                sink: str = "") -> Optional[list[str]]:
+    """Build a detached player argv. Overlapping plays = multiple processes.
+
+    ``sink`` is a PipeWire/Pulse sink name (empty = system default).
+    """
     vol = max(1, min(100, int(volume_pct))) / 100.0
+    sink = (sink or "").strip()
     if shutil.which("pw-play"):
-        return ["pw-play", f"--volume={vol:.3f}", path]
+        argv = ["pw-play", f"--volume={vol:.3f}"]
+        if sink:
+            argv += ["--target", sink]
+        argv.append(path)
+        return argv
     if shutil.which("paplay"):
         # paplay volume is 0..65536 linear
-        return ["paplay", f"--volume={int(vol * 65536)}", path]
+        argv = ["paplay", f"--volume={int(vol * 65536)}"]
+        if sink:
+            argv += [f"--device={sink}"]
+        argv.append(path)
+        return argv
     if shutil.which("ffplay"):
+        # ffplay has no Pulse device flag; PULSE_SINK is applied in _spawn.
         return ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet",
                 "-volume", str(int(vol * 100)), path]
     if shutil.which("mpv"):
-        return ["mpv", "--no-video", "--really-quiet",
-                f"--volume={int(vol * 100)}", path]
+        argv = ["mpv", "--no-video", "--really-quiet",
+                f"--volume={int(vol * 100)}"]
+        if sink:
+            argv.append(f"--audio-device=pipewire/{sink}")
+        argv.append(path)
+        return argv
     return None
 
 
-def play(clip: str = "bleep", file_path: str = "", volume: str | int = 80) -> bool:
+def _spawn_player(argv: list[str], *, sink: str = "") -> bool:
+    """Start one detached player process. Returns True on success."""
+    try:
+        from .actions import child_env
+        env = child_env()
+        # ffplay (and some Pulse clients) honour PULSE_SINK when --device is
+        # unavailable. Harmless for pw-play which already got --target.
+        if sink:
+            env = dict(env)
+            env["PULSE_SINK"] = sink
+        subprocess.Popen(
+            argv, start_new_session=True, env=env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL)
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.warning("play_sound failed: %s", e)
+        return False
+
+
+def play(clip: str = "bruh", file_path: str = "", volume: str | int = 80,
+         sink: str = "", also_default: bool = True) -> bool:
     """Play a clip (or custom file). Returns True if a player was started.
 
     Never raises. Multiple calls overlap (mix) by design.
+
+    ``sink`` routes to a specific PipeWire/Pulse sink so OBS can capture
+    soundboard audio (pick a virtual sink / the device OBS monitors). When
+    ``also_default`` is True and ``sink`` is set, a second play goes to the
+    system default so you still hear the clip on headphones.
     """
     try:
         vol_i = int(float(str(volume).strip().rstrip("%").replace(",", ".")))
@@ -151,20 +242,18 @@ def play(clip: str = "bleep", file_path: str = "", volume: str | int = 80) -> bo
     path = resolve_clip(clip, file_path)
     if not path:
         return False
-    argv = _player_cmd(path, vol_i)
-    if not argv:
-        log.warning(
-            "play_sound needs pw-play, paplay, ffplay, or mpv — nothing played")
-        return False
-    try:
-        # Detached so overlapping keypresses mix; use a clean env when the
-        # app is running from AppImage/snap (same idea as actions.child_env).
-        from .actions import child_env
-        subprocess.Popen(
-            argv, start_new_session=True, env=child_env(),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL)
-        return True
-    except Exception as e:  # noqa: BLE001
-        log.warning("play_sound failed: %s", e)
-        return False
+    sink = (sink or "").strip()
+    targets: list[str] = [sink] if sink else [""]
+    if sink and also_default:
+        targets.append("")  # default output as well
+
+    started = False
+    for target in targets:
+        argv = _player_cmd(path, vol_i, target)
+        if not argv:
+            log.warning(
+                "play_sound needs pw-play, paplay, ffplay, or mpv — nothing played")
+            return False
+        if _spawn_player(argv, sink=target):
+            started = True
+    return started
