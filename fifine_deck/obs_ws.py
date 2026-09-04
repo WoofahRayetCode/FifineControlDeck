@@ -7,9 +7,12 @@ framing layer, JSON, and SHA-256 for the Identify authentication challenge.
 Designed for keypress actions:
 - Short connect/request timeouts so a down OBS cannot freeze the deck.
 - Shared cached connection with reconnect-once on stale sockets.
+- Sessions stay open after a successful ``ping()`` / ``call()`` / ``ensure()``
+  so Fifine appears in OBS → Tools → WebSocket Server Settings.
 - No event subscriptions (request/response only).
-- Never raises into callers of the module-level ``call()`` / ``ping()``
-  helpers used by the action engine — those log and return None.
+- Never raises into callers of the module-level ``call()`` / ``ping()`` /
+  ``ensure()`` helpers used by the action engine — those log and return
+  None / False.
 """
 from __future__ import annotations
 
@@ -384,6 +387,28 @@ def _key(host: str, port: int, password: str) -> tuple[str, int, str]:
     return (host or DEFAULT_HOST, int(port or DEFAULT_PORT), password or "")
 
 
+def _normalize_endpoint(host: str, port: int | str,
+                        password: str) -> tuple[str, int, str]:
+    host = (host or DEFAULT_HOST).strip() or DEFAULT_HOST
+    try:
+        port_i = int(port)
+    except (TypeError, ValueError):
+        port_i = DEFAULT_PORT
+    return host, port_i, password or ""
+
+
+def _install_cache(client: ObsClient, host: str, port: int,
+                   password: str) -> None:
+    """Make ``client`` the process-wide live session (closes any previous)."""
+    global _cached, _cached_key
+    k = _key(host, port, password)
+    with _cache_lock:
+        old, _cached = _cached, client
+        _cached_key = k
+    if old is not None and old is not client:
+        old.close()
+
+
 def _get_client(host: str, port: int, password: str) -> ObsClient:
     global _cached, _cached_key
     k = _key(host, port, password)
@@ -399,10 +424,44 @@ def _get_client(host: str, port: int, password: str) -> ObsClient:
         old.close()
     client = ObsClient(k[0], k[1], k[2])
     client.connect()
-    with _cache_lock:
-        _cached = client
-        _cached_key = k
+    _install_cache(client, k[0], k[1], k[2])
     return client
+
+
+def is_connected() -> bool:
+    """True when a live identified OBS session is cached."""
+    with _cache_lock:
+        return _cached is not None and _cached.connected
+
+
+def ensure(host: str, port: int | str, password: str) -> bool:
+    """Keep (or open) a persistent OBS session so we appear in OBS's
+    Tools → WebSocket Server Settings session table.
+
+    Returns True when a live identified connection is available. Never raises.
+    """
+    host, port_i, password = _normalize_endpoint(host, port, password)
+    try:
+        client = _get_client(host, port_i, password)
+        # Cheap keepalive — also proves the socket is still accepted by OBS.
+        client.call("GetVersion")
+        return True
+    except ObsError as e:
+        log.debug("OBS ensure failed: %s", e)
+        invalidate()
+        # One reconnect attempt after a stale socket.
+        try:
+            client = _get_client(host, port_i, password)
+            client.call("GetVersion")
+            return True
+        except Exception as e2:  # noqa: BLE001
+            log.debug("OBS ensure retry failed: %s", e2)
+            invalidate()
+            return False
+    except Exception as e:  # noqa: BLE001
+        log.debug("OBS ensure failed: %s", e)
+        invalidate()
+        return False
 
 
 def call(host: str, port: int, password: str, request_type: str,
@@ -410,13 +469,9 @@ def call(host: str, port: int, password: str, request_type: str,
     """Run one OBS request. Returns responseData, or None on failure.
 
     Reconnects once if the cached socket is stale. Never raises.
+    Successful calls leave the session open so OBS lists this client.
     """
-    host = (host or DEFAULT_HOST).strip() or DEFAULT_HOST
-    try:
-        port_i = int(port)
-    except (TypeError, ValueError):
-        port_i = DEFAULT_PORT
-    password = password or ""
+    host, port_i, password = _normalize_endpoint(host, port, password)
 
     for attempt in (0, 1):
         try:
@@ -444,24 +499,31 @@ def call(host: str, port: int, password: str, request_type: str,
 
 
 def ping(host: str, port: int, password: str) -> tuple[bool, str]:
-    """Test connectivity. Returns (ok, message) for the settings dialog."""
+    """Test connectivity. Returns (ok, message) for the settings dialog.
+
+    On success the session is kept open (and cached) so Fifine appears in
+    OBS's WebSocket session table — closing immediately after a test made
+    the connection invisible there.
+    """
     invalidate()
-    host = (host or DEFAULT_HOST).strip() or DEFAULT_HOST
+    host, port_i, password = _normalize_endpoint(host, port, password)
     try:
-        port_i = int(port)
-    except (TypeError, ValueError):
-        return False, f"invalid port: {port!r}"
-    try:
-        client = ObsClient(host, port_i, password or "")
+        client = ObsClient(host, port_i, password)
         client.connect()
         data = client.call("GetVersion")
-        client.close()
+        _install_cache(client, host, port_i, password)
         studio = data.get("obsVersion") or client.obs_studio_version or "?"
         ws = data.get("obsWebSocketVersion") or client.obs_ws_version or "?"
-        return True, f"Connected to OBS {studio} (websocket {ws}) at {host}:{port_i}"
+        return True, (
+            f"Connected to OBS {studio} (websocket {ws}) at {host}:{port_i}. "
+            f"Fifine stays listed under Tools → WebSocket Server Settings "
+            f"while this app is running."
+        )
     except ObsError as e:
+        invalidate()
         return False, str(e)
     except Exception as e:  # noqa: BLE001
+        invalidate()
         return False, str(e)
 
 
