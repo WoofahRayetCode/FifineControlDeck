@@ -4,19 +4,24 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 
-from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer
-from PyQt6.QtGui import QAction, QIcon, QPixmap
+from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer, QEvent, QPoint
+from PyQt6.QtGui import (QAction, QIcon, QPixmap, QColor, QTextCharFormat,
+                         QTextCursor, QGuiApplication, QMovie)
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QGridLayout, QVBoxLayout, QHBoxLayout, QLabel,
     QComboBox, QPushButton, QSlider, QInputDialog, QMessageBox, QDockWidget,
     QSystemTrayIcon, QMenu, QStatusBar, QScrollArea, QFileDialog, QCheckBox,
-    QDialog, QFormLayout, QLineEdit, QSpinBox, QDialogButtonBox,
+    QDialog, QFormLayout, QLineEdit, QSpinBox, QDialogButtonBox, QStackedWidget,
+    QTextEdit, QSizePolicy, QApplication,
 )
 
 from .. import rendering, assets
 from ..device import DEVICE_PROFILE
 from ..model import (DeckConfig, Profile, Page, KeyConfig, Action, Folder,
+                     PAGE_DISPLAY_KEYS, PAGE_DISPLAY_TWITCH_CHAT,
+                     PAGE_DISPLAY_PHOTO,
                      iter_config_secret_ids, _next_backup_path,
                      _page_loss_summary, _folder_loss_summary)
 from ..actions import default_icon_for, parse_catalog_drag
@@ -37,6 +42,7 @@ class _Bridge(QObject):
     pageChanged = pyqtSignal()
     brightnessChanged = pyqtSignal(int)
     monitorImage = pyqtSignal(int, object, str)   # (key index, PIL image, page id)
+    chatUpdated = pyqtSignal()
 
 
 class MainWindow(QMainWindow):
@@ -54,14 +60,22 @@ class MainWindow(QMainWindow):
         self._owned_secret_ids: set[str] = set(iter_config_secret_ids(config))
 
         self.setWindowTitle("fifine Control Deck")
-        self.resize(1000, 620)
         # Keep a normal minimize button so the window can sit on the taskbar
         # (distinct from Hide to background, which removes it from the panel).
         self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, True)
+        self._geo_save_timer = QTimer(self)
+        self._geo_save_timer.setSingleShot(True)
+        self._geo_save_timer.setInterval(400)
+        self._geo_save_timer.timeout.connect(self._persist_window_geometry)
+        self._applying_geometry = False
+        self._photo_movie: QMovie | None = None
+        self._apply_window_geometry()
 
         # Let action editors offer a profile dropdown for the "switch profile" action.
         from . import widgets as _widgets
         _widgets.PROFILES_PROVIDER = lambda: self.config.profiles
+        # Live OBS scene/input/source names for action-editor combos.
+        _widgets.OBS_CONN_PROVIDER = self.controller.obs_connection
         # Let grid previews render monitor keys from the controller's live
         # sampler (last reading + history) instead of a static placeholder.
         _widgets.MONITOR_PREVIEW_PROVIDER = self._monitor_preview
@@ -71,6 +85,15 @@ class MainWindow(QMainWindow):
         # Other pages in the current container for "Move to page" on folders.
         _widgets.FOLDER_MOVE_PAGES_PROVIDER = self._folder_move_page_targets
 
+        # Keep a live OBS websocket session while the app runs so Fifine
+        # appears in OBS → Tools → WebSocket Server Settings (session table).
+        # On-demand connect/close for each chip made us invisible there.
+        self._obs_keepalive = QTimer(self)
+        self._obs_keepalive.setInterval(30_000)
+        self._obs_keepalive.timeout.connect(self._ensure_obs_session)
+        QTimer.singleShot(1500, self._ensure_obs_session)
+        self._obs_keepalive.start()
+
         self.bridge = _Bridge()
         self.bridge.connected.connect(self._on_connected)
         self.bridge.disconnected.connect(self._on_disconnected)
@@ -78,6 +101,7 @@ class MainWindow(QMainWindow):
         self.bridge.pageChanged.connect(self._on_external_page_change)
         self.bridge.brightnessChanged.connect(self._on_brightness_changed)
         self.bridge.monitorImage.connect(self._on_monitor_image)
+        self.bridge.chatUpdated.connect(self._on_chat_updated)
         controller.on_connect = lambda dev: self.bridge.connected.emit()
         controller.on_disconnect = lambda: self.bridge.disconnected.emit()
         controller.on_key_event = lambda i, p: self.bridge.keyEvent.emit(i, p)
@@ -87,6 +111,7 @@ class MainWindow(QMainWindow):
         controller.on_brightness_changed = lambda v: self.bridge.brightnessChanged.emit(v)
         controller.on_monitor_image = \
             lambda i, img, page_id="": self.bridge.monitorImage.emit(i, img, page_id)
+        controller.on_chat_updated = lambda: self.bridge.chatUpdated.emit()
 
         self._close_notified = False
         self.tray = None
@@ -100,6 +125,7 @@ class MainWindow(QMainWindow):
         self._queue_save()
         self._reload_profiles()
         self._rebuild_grid()
+        self._sync_page_mode_ui()
         self._last_page_key = self._current_page_key()
 
         # Follow the screen: blank the deck when the monitor/screensaver blanks,
@@ -257,7 +283,8 @@ class MainWindow(QMainWindow):
         hint = QLabel(
             "Enable the WebSocket server in OBS under "
             "<b>Tools → WebSocket Server Settings</b> (OBS 28+). "
-            "Default port is 4455.")
+            "Default port is 4455. After a successful test or save, Fifine "
+            "stays connected and shows up in that dialog's session table.")
         hint.setWordWrap(True)
         form.addRow(hint)
 
@@ -314,13 +341,27 @@ class MainWindow(QMainWindow):
                         "be saved in your configuration file in cleartext.")
             obs_ws.invalidate()
             self._queue_save()
+            # Re-open a persistent session with the new credentials so OBS
+            # lists this client again (invalidate alone left the table empty).
+            self._ensure_obs_session()
             dlg.accept()
 
         buttons.accepted.connect(_save)
         dlg.exec()
 
+    def _ensure_obs_session(self) -> None:
+        """Open/refresh the cached OBS websocket (no-op if OBS is down)."""
+        from .. import obs_ws
+        try:
+            host, port, password = self.controller.obs_connection()
+        except Exception:
+            return
+        # Skip when nothing is configured (still default host is fine — OBS
+        # may simply be offline; ensure() is silent on failure).
+        obs_ws.ensure(host, port, password)
+
     def _twitch_settings(self):
-        """Edit Twitch Helix Client-ID / Client Secret for monitor keys."""
+        """Edit Twitch Helix Client-ID / Client Secret and broadcaster OAuth."""
         from .. import secret_store, twitch
 
         dlg = QDialog(self)
@@ -345,14 +386,34 @@ class MainWindow(QMainWindow):
         form.addRow("Client-ID", client_id)
         form.addRow("Client Secret", secret)
         form.addRow("Test channel", test_login)
+
+        login_status = QLabel("")
+        login_status.setWordWrap(True)
+
+        def _refresh_login_status():
+            ok, who = twitch.user_login_status()
+            if ok:
+                login_status.setText(f"Broadcaster login: <b>{who}</b> "
+                                     f"(ads countdown / snooze)")
+                login_status.setStyleSheet("color:#6dce8a;")
+            else:
+                login_status.setText(
+                    "Broadcaster login: not signed in — required for the "
+                    "<b>Twitch ad countdown</b> chip and <b>Snooze ad</b>.")
+                login_status.setStyleSheet("color:#9a9a9a;")
+
+        _refresh_login_status()
+        form.addRow(login_status)
+
         hint = QLabel(
             "Create an application at "
-            "<b>dev.twitch.tv/console</b> (OAuth Redirect URL can be "
-            "<code>http://localhost</code>). Monitor keys use metrics "
-            "<b>twitchviewers</b> / <b>twitchuptime</b> with the channel "
-            "login in Target. Helix needs both Client-ID and Client Secret "
-            "for an App Access Token.")
+            "<b>dev.twitch.tv/console</b> and paste the Client-ID / Secret "
+            "here. <b>Log in with Twitch</b> uses Twitch’s device code "
+            "(no localhost redirect). Monitor keys: <b>twitchviewers</b> / "
+            "<b>twitchuptime</b> (App Access) and <b>twitchad</b> "
+            "(broadcaster login).")
         hint.setWordWrap(True)
+        hint.setTextFormat(Qt.TextFormat.RichText)
         form.addRow(hint)
 
         buttons = QDialogButtonBox(
@@ -360,21 +421,140 @@ class MainWindow(QMainWindow):
             | QDialogButtonBox.StandardButton.Cancel)
         test_btn = buttons.addButton(
             "Test connection", QDialogButtonBox.ButtonRole.ActionRole)
+        login_btn = buttons.addButton(
+            "Log in with Twitch", QDialogButtonBox.ButtonRole.ActionRole)
+        logout_btn = buttons.addButton(
+            "Log out", QDialogButtonBox.ButtonRole.ActionRole)
         form.addRow(buttons)
 
-        def _test():
-            # Prefer the dialog field; if empty + unreadable keyring, use
-            # whatever secret_store still holds so Test matches Save.
+        def _secret_text() -> str:
             sec = secret.text()
             if not sec and sid and unreadable:
                 sec = secret_store.get(sid) or ""
-            ok, msg = twitch.ping(client_id.text(), sec, test_login.text())
+            return sec
+
+        def _persist_client_fields() -> None:
+            """Write Client-ID/Secret from the dialog into config (for login)."""
+            self.config.twitch_client_id = client_id.text().strip()
+            text = secret.text()
+            if text:
+                new_sid = sid or secret_store.new_id()
+                if secret_store.store(new_sid, text):
+                    self.config.twitch_secret_id = new_sid
+                    self.config.twitch_client_secret = ""
+                    self._owned_secret_ids.add(new_sid)
+                else:
+                    self.config.twitch_secret_id = ""
+                    self.config.twitch_client_secret = text
+
+        def _test():
+            ok, msg = twitch.ping(
+                client_id.text(), _secret_text(), test_login.text())
             if ok:
                 QMessageBox.information(dlg, "Twitch connection", msg)
             else:
                 QMessageBox.warning(dlg, "Twitch connection", msg)
 
+        def _login():
+            # Device-code OAuth (no localhost server). Wait/poll on a worker
+            # thread so the UI stays responsive.
+            _persist_client_fields()
+            twitch.invalidate()
+            twitch.set_creds_provider(self.controller.twitch_credentials)
+            twitch.set_user_session_provider(
+                self.controller.twitch_user_session)
+            twitch.set_user_session_saver(
+                self.controller.save_twitch_user_session)
+            cid = client_id.text().strip()
+            sec = _secret_text()
+
+            wait = QDialog(dlg)
+            wait.setWindowTitle("Twitch login")
+            wait.setModal(True)
+            vl = QVBoxLayout(wait)
+            info = QLabel(
+                "A browser will open to <b>twitch.tv/activate</b>.\n"
+                "Sign in, enter the code below if asked, and approve access.")
+            info.setWordWrap(True)
+            vl.addWidget(info)
+            code_lbl = QLabel("…")
+            code_lbl.setStyleSheet(
+                "font-size:22px;font-weight:bold;letter-spacing:2px;")
+            code_lbl.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse)
+            vl.addWidget(code_lbl)
+            status = QLabel("Starting login…")
+            status.setStyleSheet("color:#9a9a9a;")
+            vl.addWidget(status)
+            bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+            vl.addWidget(bb)
+            outcome: dict = {"result": None}
+            hold: dict = {"session": None}
+            started = threading.Event()
+
+            def _worker():
+                try:
+                    session = twitch.DeviceLoginSession(cid, sec)
+                    hold["session"] = session
+                    url = session.begin()
+                    outcome["auth_url"] = url
+                    outcome["user_code"] = session.user_code
+                    started.set()
+                    outcome["result"] = session.finish()
+                except Exception as e:  # noqa: BLE001
+                    outcome["result"] = (
+                        False, str(e), "", "", "", "")
+                    started.set()
+
+            def _on_cancel():
+                sess = hold.get("session")
+                if sess is not None:
+                    sess.cancel()
+                status.setText("Cancelling…")
+
+            bb.rejected.connect(_on_cancel)
+            thread = threading.Thread(
+                target=_worker, name="twitch-oauth", daemon=True)
+            thread.start()
+            wait.show()
+
+            while thread.is_alive() and not started.is_set():
+                QApplication.processEvents()
+                started.wait(0.05)
+            user_code = outcome.get("user_code") or ""
+            auth_url = outcome.get("auth_url") or ""
+            if user_code:
+                code_lbl.setText(user_code)
+            if auth_url:
+                status.setText("Waiting for approval on Twitch…")
+                twitch.open_url_nonblocking(auth_url)
+
+            while thread.is_alive():
+                QApplication.processEvents()
+                thread.join(0.05)
+            wait.close()
+
+            result = outcome.get("result")
+            if not result:
+                return
+            ok, msg, _a, _r, _uid, _ulogin = result
+            if ok:
+                self._queue_save()
+                _refresh_login_status()
+                QMessageBox.information(dlg, "Twitch login", msg)
+            elif "cancel" in (msg or "").lower():
+                pass
+            else:
+                QMessageBox.warning(dlg, "Twitch login", msg)
+
+        def _logout():
+            self.controller.clear_twitch_user_session()
+            self._queue_save()
+            _refresh_login_status()
+
         test_btn.clicked.connect(_test)
+        login_btn.clicked.connect(_login)
+        logout_btn.clicked.connect(_logout)
         buttons.rejected.connect(dlg.reject)
 
         def _save():
@@ -783,9 +963,98 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Configuration imported (backup: {backup})", 6000)
 
     def show_and_raise(self):
-        self.showNormal()
+        if self.config.window_maximized:
+            self.showMaximized()
+        else:
+            self.showNormal()
         self.raise_()
         self.activateWindow()
+
+    def _apply_window_geometry(self):
+        """Restore size/position from config (called once during construction)."""
+        cfg = self.config
+        w = max(400, int(cfg.window_w or 1000))
+        h = max(300, int(cfg.window_h or 620))
+        self._applying_geometry = True
+        try:
+            self.resize(w, h)
+            if cfg.window_pos_saved:
+                pos = QPoint(int(cfg.window_x), int(cfg.window_y))
+                # If the saved corner isn't on any screen (dock unplugged),
+                # fall back to the primary screen's available area.
+                screens = QGuiApplication.screens()
+                on_screen = False
+                for scr in screens or []:
+                    if scr.availableGeometry().contains(pos):
+                        on_screen = True
+                        break
+                if on_screen:
+                    self.move(pos)
+                elif screens:
+                    ag = screens[0].availableGeometry()
+                    self.move(ag.x() + max(0, (ag.width() - w) // 2),
+                              ag.y() + max(0, (ag.height() - h) // 2))
+        finally:
+            self._applying_geometry = False
+
+    def _capture_window_geometry(self) -> bool:
+        """Copy the current frame into config. Returns True if anything changed."""
+        if self._applying_geometry or self.isMinimized():
+            return False
+        cfg = self.config
+        maximized = self.isMaximized()
+        # normalGeometry() is the restore size while maximized.
+        g = self.normalGeometry() if maximized else self.geometry()
+        nx, ny, nw, nh = int(g.x()), int(g.y()), int(g.width()), int(g.height())
+        nw = max(400, nw)
+        nh = max(300, nh)
+        changed = (
+            cfg.window_pos_saved is not True
+            or cfg.window_x != nx
+            or cfg.window_y != ny
+            or cfg.window_w != nw
+            or cfg.window_h != nh
+            or bool(cfg.window_maximized) != bool(maximized)
+        )
+        if not changed:
+            return False
+        cfg.window_pos_saved = True
+        cfg.window_x = nx
+        cfg.window_y = ny
+        cfg.window_w = nw
+        cfg.window_h = nh
+        cfg.window_maximized = bool(maximized)
+        return True
+
+    def _persist_window_geometry(self):
+        if self._capture_window_geometry():
+            self._queue_save()
+
+    def _schedule_geometry_save(self):
+        if self._applying_geometry or self.isMinimized():
+            return
+        self._geo_save_timer.start()
+
+    def changeEvent(self, e):
+        super().changeEvent(e)
+        if e.type() == QEvent.Type.WindowStateChange:
+            self._schedule_geometry_save()
+
+    def moveEvent(self, e):
+        super().moveEvent(e)
+        self._schedule_geometry_save()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._schedule_geometry_save()
+        # Keep the photo preview fitted if that page is showing.
+        try:
+            if (hasattr(self, "center_stack")
+                    and self.center_stack.currentIndex() == 2
+                    and self._page().is_photo()):
+                self._refresh_photo_preview()
+        except Exception:
+            pass
 
     # -- UI construction ---------------------------------------------------
     def _build_ui(self):
@@ -806,7 +1075,12 @@ class MainWindow(QMainWindow):
                                 ("⇅", self._reorder_profiles, "Reorder profiles"),
                                 ("–", self._del_profile, "Delete profile")]:
             b = QPushButton(text)
-            b.setFixedWidth(70 if len(text) > 1 else 32)
+            # Icon-only controls stay square; labelled ones (Rename) size to
+            # their text so the caption is not clipped by a fixed 70px box.
+            if len(text) <= 1:
+                b.setFixedWidth(32)
+            else:
+                b.setFixedWidth(max(80, b.sizeHint().width() + 16))
             b.setToolTip(tip)
             b.clicked.connect(slot)
             bar.addWidget(b)
@@ -824,6 +1098,38 @@ class MainWindow(QMainWindow):
             b.setToolTip(tip)
             b.clicked.connect(slot)
             bar.addWidget(b)
+
+        bar.addSpacing(16)
+        bar.addWidget(QLabel("Page mode:"))
+        self.page_mode_combo = _protect_wheel(QComboBox(), self._nowheel)
+        self.page_mode_combo.addItem("Keys", PAGE_DISPLAY_KEYS)
+        self.page_mode_combo.addItem("Twitch chat", PAGE_DISPLAY_TWITCH_CHAT)
+        self.page_mode_combo.addItem("Photo / GIF", PAGE_DISPLAY_PHOTO)
+        self.page_mode_combo.setToolTip(
+            "Keys: normal action grid. Twitch chat: live chat across the page. "
+            "Photo / GIF: one image or animated GIF spread across every deck key.")
+        self.page_mode_combo.currentIndexChanged.connect(self._on_page_mode_changed)
+        bar.addWidget(self.page_mode_combo)
+        self.chat_channel_edit = QLineEdit()
+        self.chat_channel_edit.setPlaceholderText("channel login")
+        self.chat_channel_edit.setFixedWidth(140)
+        self.chat_channel_edit.setToolTip(
+            "Twitch channel login for this chat page (no #). "
+            "Anonymous read-only IRC — no extra OAuth needed.")
+        self.chat_channel_edit.editingFinished.connect(self._on_chat_channel_edited)
+        bar.addWidget(self.chat_channel_edit)
+        self.photo_path_edit = QLineEdit()
+        self.photo_path_edit.setPlaceholderText("photo / GIF path")
+        self.photo_path_edit.setFixedWidth(180)
+        self.photo_path_edit.setToolTip(
+            "Image or animated GIF for Photo / GIF page mode "
+            "(PNG/JPEG/WebP/GIF). Spread across all deck keys; GIFs animate.")
+        self.photo_path_edit.editingFinished.connect(self._on_photo_path_edited)
+        bar.addWidget(self.photo_path_edit)
+        self.photo_browse_btn = QPushButton("Browse…")
+        self.photo_browse_btn.setToolTip("Choose a photo or GIF for this page")
+        self.photo_browse_btn.clicked.connect(self._on_photo_browse)
+        bar.addWidget(self.photo_browse_btn)
 
         bar.addStretch()
         bar.addWidget(QLabel("Brightness"))
@@ -854,6 +1160,9 @@ class MainWindow(QMainWindow):
         crumb.addWidget(self.create_folder_btn)
         root.addLayout(crumb)
 
+        # Center stack: normal key grid, or a full-page Twitch chat panel.
+        self.center_stack = QStackedWidget()
+
         # key grid, centered on a "device" panel
         self.grid_host = QWidget()
         self.grid_host.setObjectName("deckPanel")
@@ -870,7 +1179,92 @@ class MainWindow(QMainWindow):
         center.addWidget(self.grid_host, 0, Qt.AlignmentFlag.AlignCenter)
         wrap = QWidget()
         wrap.setLayout(center)
-        root.addWidget(wrap, 1)
+        self.center_stack.addWidget(wrap)          # index 0 = keys
+
+        chat_page = QWidget()
+        chat_page.setObjectName("twitchChatPage")
+        chat_page.setStyleSheet(
+            "#twitchChatPage{background:#0e0e10;border:1px solid #333;"
+            "border-radius:12px;}")
+        chat_lay = QVBoxLayout(chat_page)
+        chat_lay.setContentsMargins(16, 12, 16, 12)
+        chat_lay.setSpacing(8)
+        head = QHBoxLayout()
+        self.chat_back_btn = QPushButton("← Chips")
+        self.chat_back_btn.setToolTip(
+            "Return to a normal keys/chip page "
+            "(same as double-pressing the top-left deck key)")
+        self.chat_back_btn.clicked.connect(self._on_chat_back)
+        head.addWidget(self.chat_back_btn)
+        self.chat_title = QLabel("Twitch chat")
+        self.chat_title.setStyleSheet(
+            "color:#efeff1;font-size:16px;font-weight:600;")
+        head.addWidget(self.chat_title)
+        head.addStretch()
+        self.chat_status_label = QLabel("")
+        self.chat_status_label.setStyleSheet("color:#adadb8;")
+        head.addWidget(self.chat_status_label)
+        chat_lay.addLayout(head)
+        self.chat_view = QTextEdit()
+        self.chat_view.setReadOnly(True)
+        self.chat_view.setAcceptRichText(True)
+        self.chat_view.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                     QSizePolicy.Policy.Expanding)
+        self.chat_view.setStyleSheet(
+            "QTextEdit{background:#18181b;color:#efeff1;border:none;"
+            "border-radius:8px;padding:8px;font-size:13px;}")
+        chat_lay.addWidget(self.chat_view, 1)
+        hint = QLabel(
+            "This page is in Twitch chat mode. The deck keys show the same "
+            "feed. Double-press the top-left deck key (or ← Chips) to return "
+            "to a chip/keys page. Or set Page mode back to Keys.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#7a7a85;")
+        chat_lay.addWidget(hint)
+        self.center_stack.addWidget(chat_page)     # index 1 = chat
+
+        photo_page = QWidget()
+        photo_page.setObjectName("photoPage")
+        photo_page.setStyleSheet(
+            "#photoPage{background:#0e0e10;border:1px solid #333;"
+            "border-radius:12px;}")
+        photo_lay = QVBoxLayout(photo_page)
+        photo_lay.setContentsMargins(16, 12, 16, 12)
+        photo_lay.setSpacing(8)
+        phead = QHBoxLayout()
+        self.photo_back_btn = QPushButton("← Chips")
+        self.photo_back_btn.setToolTip(
+            "Return to a normal keys/chip page "
+            "(same as double-pressing the top-left deck key)")
+        self.photo_back_btn.clicked.connect(self._on_chat_back)
+        phead.addWidget(self.photo_back_btn)
+        self.photo_title = QLabel("Photo / GIF")
+        self.photo_title.setStyleSheet(
+            "color:#efeff1;font-size:16px;font-weight:600;")
+        phead.addWidget(self.photo_title)
+        phead.addStretch()
+        self.photo_pick_btn = QPushButton("Choose image…")
+        self.photo_pick_btn.clicked.connect(self._on_photo_browse)
+        phead.addWidget(self.photo_pick_btn)
+        photo_lay.addLayout(phead)
+        self.photo_preview = QLabel()
+        self.photo_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.photo_preview.setMinimumSize(320, 200)
+        self.photo_preview.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                         QSizePolicy.Policy.Expanding)
+        self.photo_preview.setStyleSheet(
+            "QLabel{background:#18181b;border-radius:8px;color:#7a7a85;}")
+        self.photo_preview.setText("No image selected")
+        photo_lay.addWidget(self.photo_preview, 1)
+        phint = QLabel(
+            "This page shows one photo or animated GIF across every deck key. "
+            "Double-press the top-left deck key (or ← Chips) to return "
+            "to a chip/keys page.")
+        phint.setWordWrap(True)
+        phint.setStyleSheet("color:#7a7a85;")
+        photo_lay.addWidget(phint)
+        self.center_stack.addWidget(photo_page)    # index 2 = photo
+        root.addWidget(self.center_stack, 1)
 
         self.setCentralWidget(central)
 
@@ -1072,8 +1466,202 @@ class MainWindow(QMainWindow):
         self.controller.page_index = i
         self._reload_knobs()
         self._refresh_all_previews()
+        self._sync_page_mode_ui()
         self.controller.render_page()
         self._deselect()
+
+    def _sync_page_mode_ui(self):
+        """Refresh page-mode combo / fields / center stack for the page."""
+        page = self._page()
+        mode = page.display_mode if page.display_mode in (
+            PAGE_DISPLAY_KEYS, PAGE_DISPLAY_TWITCH_CHAT, PAGE_DISPLAY_PHOTO
+        ) else PAGE_DISPLAY_KEYS
+        self.page_mode_combo.blockSignals(True)
+        idx = self.page_mode_combo.findData(mode)
+        self.page_mode_combo.setCurrentIndex(max(0, idx))
+        self.page_mode_combo.blockSignals(False)
+
+        chat = mode == PAGE_DISPLAY_TWITCH_CHAT
+        photo = mode == PAGE_DISPLAY_PHOTO
+        special = chat or photo
+
+        self.chat_channel_edit.blockSignals(True)
+        self.chat_channel_edit.setText(page.chat_channel or "")
+        self.chat_channel_edit.blockSignals(False)
+        self.chat_channel_edit.setVisible(chat)
+        self.chat_channel_edit.setEnabled(chat)
+
+        self.photo_path_edit.blockSignals(True)
+        self.photo_path_edit.setText(page.photo_path or "")
+        self.photo_path_edit.blockSignals(False)
+        self.photo_path_edit.setVisible(photo)
+        self.photo_path_edit.setEnabled(photo)
+        self.photo_browse_btn.setVisible(photo)
+        self.photo_browse_btn.setEnabled(photo)
+
+        if chat:
+            self.center_stack.setCurrentIndex(1)
+        elif photo:
+            self.center_stack.setCurrentIndex(2)
+        else:
+            self.center_stack.setCurrentIndex(0)
+
+        self.grid_host.setVisible(not special)
+        self.create_folder_btn.setEnabled(not special)
+        if chat:
+            channel = (page.chat_channel or "").strip().lstrip("#")
+            self.chat_title.setText(
+                f"Twitch chat — #{channel}" if channel else "Twitch chat")
+            self._refresh_chat_view()
+            self._last_chat_count = -1
+        if photo:
+            self._refresh_photo_preview()
+
+    def _on_page_mode_changed(self, _i: int = 0):
+        page = self._page()
+        mode = self.page_mode_combo.currentData() or PAGE_DISPLAY_KEYS
+        page.display_mode = mode
+        if mode == PAGE_DISPLAY_TWITCH_CHAT:
+            if not page.name or page.name.lower() in ("page", "main"):
+                channel = (page.chat_channel or self.chat_channel_edit.text()
+                           or "").strip().lstrip("#")
+                page.name = f"Chat {channel}" if channel else "Twitch chat"
+            self._reload_pages()
+        elif mode == PAGE_DISPLAY_PHOTO:
+            if not page.name or page.name.lower() in ("page", "main"):
+                path = (page.photo_path or self.photo_path_edit.text() or "").strip()
+                base = os.path.splitext(os.path.basename(path))[0] if path else ""
+                page.name = base or "Photo"
+            self._reload_pages()
+        self._sync_page_mode_ui()
+        self.controller.render_page()
+        self._queue_save()
+
+    def _on_chat_channel_edited(self):
+        page = self._page()
+        channel = self.chat_channel_edit.text().strip().lstrip("#").lower()
+        self.chat_channel_edit.blockSignals(True)
+        self.chat_channel_edit.setText(channel)
+        self.chat_channel_edit.blockSignals(False)
+        if page.chat_channel == channel:
+            return
+        page.chat_channel = channel
+        if page.is_twitch_chat():
+            if channel and (not page.name or page.name.lower().startswith(
+                    ("page", "main", "twitch chat", "chat "))):
+                page.name = f"Chat {channel}"
+                self._reload_pages()
+            self._sync_page_mode_ui()
+            self.controller.render_page()
+        self._queue_save()
+
+    def _on_photo_path_edited(self):
+        page = self._page()
+        path = os.path.expanduser(self.photo_path_edit.text().strip())
+        self.photo_path_edit.blockSignals(True)
+        self.photo_path_edit.setText(path)
+        self.photo_path_edit.blockSignals(False)
+        if page.photo_path == path:
+            return
+        page.photo_path = path
+        if page.is_photo():
+            if path and (not page.name or page.name.lower() in (
+                    "page", "main", "photo")):
+                base = os.path.splitext(os.path.basename(path))[0]
+                if base:
+                    page.name = base
+                    self._reload_pages()
+            self._sync_page_mode_ui()
+            self.controller.render_page()
+        self._queue_save()
+
+    def _on_photo_browse(self):
+        start = self.photo_path_edit.text().strip() or os.path.expanduser("~/Pictures")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose photo or GIF", start,
+            "Images / GIF (*.png *.jpg *.jpeg *.webp *.bmp *.gif);;All files (*)")
+        if not path:
+            return
+        self.photo_path_edit.setText(path)
+        self._on_photo_path_edited()
+
+    def _stop_photo_movie(self):
+        if self._photo_movie is not None:
+            self._photo_movie.stop()
+            self.photo_preview.setMovie(None)
+            self._photo_movie = None
+
+    def _refresh_photo_preview(self):
+        page = self._page()
+        path = os.path.expanduser((page.photo_path or "").strip())
+        title = os.path.basename(path) if path else "Photo / GIF"
+        self.photo_title.setText(title if path else "Photo / GIF")
+        self._stop_photo_movie()
+        if not path or not os.path.isfile(path):
+            self.photo_preview.setPixmap(QPixmap())
+            self.photo_preview.setText(
+                "No image selected — click Choose image…")
+            return
+        # Animated preview for GIFs (and animated WebP when Qt supports it).
+        if path.lower().endswith((".gif", ".webp")):
+            movie = QMovie(path)
+            if movie.isValid():
+                target = self.photo_preview.size()
+                if target.width() >= 32 and target.height() >= 32:
+                    movie.setScaledSize(target)
+                self.photo_preview.setText("")
+                self.photo_preview.setPixmap(QPixmap())
+                self.photo_preview.setMovie(movie)
+                movie.start()
+                self._photo_movie = movie
+                return
+        pix = QPixmap(path)
+        if pix.isNull():
+            self.photo_preview.setPixmap(QPixmap())
+            self.photo_preview.setText("Could not load that image")
+            return
+        target = self.photo_preview.size()
+        if target.width() < 32 or target.height() < 32:
+            target = self.photo_preview.minimumSize()
+        scaled = pix.scaled(target, Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation)
+        self.photo_preview.setText("")
+        self.photo_preview.setPixmap(scaled)
+
+    def _on_chat_updated(self):
+        if not self._page().is_twitch_chat():
+            return
+        self._refresh_chat_view()
+
+    def _on_chat_back(self):
+        self.controller.exit_to_keys_page()
+
+    def _refresh_chat_view(self):
+        page = self._page()
+        channel = (page.chat_channel or "").strip().lstrip("#")
+        status = self.controller.chat_status()
+        self.chat_status_label.setText(status)
+        self.chat_title.setText(
+            f"Twitch chat — #{channel}" if channel else "Twitch chat")
+        msgs = self.controller.chat_messages()
+        # Avoid rewriting the whole document on every identical tick.
+        if getattr(self, "_last_chat_count", None) == len(msgs) and msgs:
+            # Still update status text above; messages unchanged.
+            return
+        self._last_chat_count = len(msgs)
+        self.chat_view.clear()
+        cursor = self.chat_view.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        for msg in msgs:
+            user_fmt = QTextCharFormat()
+            user_fmt.setForeground(QColor(msg.color or "#9147ff"))
+            user_fmt.setFontWeight(700)
+            text_fmt = QTextCharFormat()
+            text_fmt.setForeground(QColor("#efeff1"))
+            cursor.insertText(f"{msg.user}", user_fmt)
+            cursor.insertText(f": {msg.text}\n", text_fmt)
+        self.chat_view.setTextCursor(cursor)
+        self.chat_view.ensureCursorVisible()
 
     def _add_profile(self):
         name, ok = QInputDialog.getText(self, "New profile", "Name:")
@@ -1419,7 +2007,18 @@ class MainWindow(QMainWindow):
         # the first action's identity forever.)
         old_icon_name, old_label = default_icon_for(kc.action)
         old_auto_icon = assets.library_ref(old_icon_name)
-        kc.action = Action(atype, dict(preset))
+        params = dict(preset)
+        # OBS chips (Mic Mute, BRB, BRB Source, …): rewrite placeholder names
+        # to whatever the live websocket reports when OBS is reachable.
+        if atype in ("obs_scene", "obs_preview_scene", "obs_mute", "obs_source"):
+            try:
+                from .. import actions as _actions
+                host, port, password = self.controller.obs_connection()
+                params = _actions.autofill_obs_params(
+                    atype, params, host, port, password)
+            except Exception:
+                pass
+        kc.action = Action(atype, params)
         if atype == "switch_profile" and self.config.profiles:
             # Materialize the target the editor will display: leaving it
             # empty made the dropped key a silent no-op until some unrelated
@@ -1830,10 +2429,14 @@ class MainWindow(QMainWindow):
         # discarded when a hotplug landed while it was open).
         changed = self._current_page_key() != getattr(self, "_last_page_key", None)
         self._last_page_key = self._current_page_key()
+        page_count = len(self.controller.container().pages)
+        pages_added = page_count > getattr(self, "_last_page_count", page_count)
+        self._last_page_count = page_count
         self._reload_profiles()          # also reloads pages from page_index
         if changed:
             self._reload_knobs()
         self._refresh_all_previews()
+        self._sync_page_mode_ui()
         self._update_breadcrumb()
         if changed:
             self._deselect()
@@ -1842,9 +2445,11 @@ class MainWindow(QMainWindow):
             # anything but a clean quit. Same gap the brightness path already
             # closed for the deck's brightness keys. The page index is not
             # persisted at all by design, so only a profile change is worth a
-            # write.
+            # write — except when a chip (e.g. Twitch chat) minted a new page.
             if self.config.active_profile_id != getattr(
                     self, "_last_saved_profile_id", self.config.active_profile_id):
+                self._queue_save()
+            elif pages_added:
                 self._queue_save()
         self._last_saved_profile_id = self.config.active_profile_id
 
@@ -1923,6 +2528,7 @@ class MainWindow(QMainWindow):
         Distinct from Hide to background, which removes the window entirely
         until it is re-opened (or shown from the tray / by launching again).
         """
+        self._persist_window_geometry()
         self.showMinimized()
 
     def _toggle_visible(self):
@@ -1935,6 +2541,7 @@ class MainWindow(QMainWindow):
         # Closing never quits: the deck keeps working in the background.
         # A tray (if present) or relaunching the command reopens the window.
         # (Minimize-to-taskbar is Options → Minimize / the title-bar button.)
+        self._persist_window_geometry()
         self.hide()
         e.ignore()
         sb = self.statusBar()
@@ -2015,6 +2622,7 @@ class MainWindow(QMainWindow):
         if self._quitting:
             return
         self._quitting = True
+        self._capture_window_geometry()
         try:
             self.config.save()
         except Exception as e:
