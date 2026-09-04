@@ -82,6 +82,7 @@ class ActionContext(Protocol):
     def adjust_brightness(self, delta: int) -> None: ...
     def sleep_screen(self) -> None: ...
     def obs_connection(self) -> tuple[str, int, str]: ...
+    def sound_output(self) -> tuple[str, bool]: ...
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +95,9 @@ ACTION_TYPES: dict[str, dict] = {
     "run_command":   {"label": "Run shell command", "params": [("command", "multiline", "Shell command")]},
     "open_url":      {"label": "Open website / file", "params": [("url", "text", "URL or path")]},
     "hotkey":        {"label": "Send hotkey", "params": [("keys", "text", "e.g. ctrl+shift+m")]},
-    "text":          {"label": "Type text", "params": [("text", "multiline", "Text to type")]},
+    "text":          {"label": "Type text", "params": [
+        ("text", "multiline", "Text to type"),
+        ("press_enter", "choice:no,yes", "Press Enter after typing (send message)")]},
     "password":      {"label": "Type password", "params": [("password", "password", "Password")]},
     "media":         {"label": "Media control", "params": [("cmd", "choice:play-pause,next,previous,stop", "Command")]},
     "volume":        {"label": "Volume", "params": [("cmd", "choice:up,down,mute", "Command"), ("step", "text", "Step % (up/down)")]},
@@ -103,6 +106,9 @@ ACTION_TYPES: dict[str, dict] = {
         ("file", "filepath", "Custom audio file"),
         ("volume", "text", "Volume % (1–100)")]},
     "close_app":     {"label": "Close application", "params": [("target", "text", "App / window name")]},
+    "chatterino":    {"label": "Chatterino command", "params": [
+        ("command", "text", "Command (default /clip)"),
+        ("window", "text", "Window class / title (default chatterino)")]},
     "next_page":     {"label": "Next page", "params": []},
     "prev_page":     {"label": "Previous page", "params": []},
     "goto_page":     {"label": "Go to page #", "params": [("page", "text", "Page number (1-based)")]},
@@ -112,15 +118,15 @@ ACTION_TYPES: dict[str, dict] = {
     "brightness":    {"label": "Brightness", "params": [("mode", "choice:set,up,down", "Mode"), ("value", "text", "Value / step")]},
     "sleep_screen":  {"label": "Sleep screen", "params": []},
     "monitor":       {"label": "System monitor", "params": [
-        ("metric", "choice:cpu,ram,vram,gpu,gputemp,temp,net,disk,clock", "Metric"),
+        ("metric", "choice:cpu,ram,vram,gpu,gputemp,cputemp,igpu,igpuvram,igpupower,igputemp,temp,net,disk,clock,procram,cpupower,gpupower,twitchviewers,twitchuptime", "Metric"),
         ("style", "choice:number,gauge,graph", "Style"),
         ("interval", "text", "Refresh every (seconds)"),
-        ("target", "text", "Disk mount / net iface / temp sensor"),
+        ("target", "text", "Disk / iface / temp / process / Twitch login"),
         ("clock_format", "choice:auto,24h,24h+seconds,12h,12h+seconds", "Clock format"),
         ("clock_date", "choice:auto,iso,us,none", "Clock date"),
     ]},
     "open_folder":   {"label": "Open folder", "params": []},
-    "folder_back":   {"label": "Back (exit folder)", "params": []},
+    "folder_back":   {"label": "Back (prev page / exit folder)", "params": []},
     "multi":         {"label": "Multi-action (steps)", "params": []},  # edited specially
     # OBS Studio via obs-websocket v5 (Options → OBS settings for host/port/password).
     "obs_scene":     {"label": "OBS: Switch scene", "params": [
@@ -142,19 +148,184 @@ ACTION_TYPES: dict[str, dict] = {
 }
 
 
-# Catalog grouping for the drag-and-drop sidebar: (category, [action types]).
-ACTION_CATALOG = [
+# Catalog grouping for the drag-and-drop sidebar: (category, [entries]).
+# Each entry is either an action-type string, or a preset dict:
+#   {"type": "monitor", "label": "GPU usage", "params": {"metric": "gpu"}}
+# Presets drop the same action type with params pre-filled (System / Soundboard).
+# Soundboard chips are built from assets/sounds/index.json — see
+# get_action_catalog().
+_ACTION_CATALOG_CORE = [
     ("Application", ["launch_app", "run_command", "open_url", "close_app"]),
     ("Keyboard",    ["hotkey", "text", "password"]),
     ("Media",       ["media", "volume", "play_sound"]),
-    ("OBS",         ["obs_scene", "obs_preview_scene", "obs_transition",
-                     "obs_source", "obs_recording", "obs_streaming", "obs_mute"]),
-    ("System",      ["monitor"]),
+    ("OBS", [
+        "obs_scene", "obs_preview_scene", "obs_transition",
+        "obs_source", "obs_recording", "obs_streaming", "obs_mute",
+        {"type": "obs_streaming", "label": "Go Live",
+         "params": {"cmd": "start"}},
+        {"type": "obs_streaming", "label": "End Stream",
+         "params": {"cmd": "stop"}},
+        {"type": "obs_recording", "label": "Record",
+         "params": {"cmd": "start"}},
+        {"type": "obs_recording", "label": "Stop Record",
+         "params": {"cmd": "stop"}},
+        {"type": "obs_scene", "label": "Starting Soon",
+         "params": {"scene": "Starting Soon"}},
+        {"type": "obs_scene", "label": "BRB",
+         "params": {"scene": "BRB"}},
+        {"type": "obs_scene", "label": "Live",
+         "params": {"scene": "Live"}},
+        {"type": "obs_scene", "label": "Game Capture",
+         "params": {"scene": "Game Capture"}},
+        {"type": "obs_mute", "label": "Mic Mute",
+         "params": {"input": "Mic/Aux", "state": "toggle"}},
+    ]),
+    ("Twitch", [
+        {"type": "chatterino", "label": "Create clip",
+         "params": {"command": "/clip", "window": "chatterino"}},
+        "chatterino",
+    ]),
+    ("System", [
+        "monitor",
+        {"type": "monitor", "label": "GPU usage",
+         "params": {"metric": "gpu"}},
+        {"type": "monitor", "label": "GPU VRAM",
+         "params": {"metric": "vram"}},
+        {"type": "monitor", "label": "GPU wattage",
+         "params": {"metric": "gpupower"}},
+        {"type": "monitor", "label": "GPU temp",
+         "params": {"metric": "gputemp"}},
+        {"type": "monitor", "label": "iGPU usage",
+         "params": {"metric": "igpu"}},
+        {"type": "monitor", "label": "iGPU VRAM",
+         "params": {"metric": "igpuvram"}},
+        {"type": "monitor", "label": "iGPU wattage",
+         "params": {"metric": "igpupower"}},
+        {"type": "monitor", "label": "iGPU temp",
+         "params": {"metric": "igputemp"}},
+        {"type": "monitor", "label": "CPU wattage",
+         "params": {"metric": "cpupower"}},
+        {"type": "monitor", "label": "CPU temp",
+         "params": {"metric": "cputemp"}},
+        {"type": "monitor", "label": "RAM usage",
+         "params": {"metric": "ram"}},
+        {"type": "monitor", "label": "Game process RAM",
+         "params": {"metric": "procram"}},
+    ]),
     ("Deck",        ["next_page", "prev_page", "goto_page", "switch_profile",
                      "next_profile", "prev_profile", "brightness", "sleep_screen"]),
     ("Folders",     ["open_folder", "folder_back"]),
     ("Advanced",    ["multi"]),
 ]
+
+
+def _short_sound_label(label: str, fallback: str = "Sound") -> str:
+    """Sidebar / key label: drop the trailing ' (MyInstants)' source tag."""
+    text = (label or "").strip() or fallback
+    if " (" in text:
+        text = text.split(" (", 1)[0].strip() or fallback
+    return text
+
+
+def soundboard_catalog_entries() -> list:
+    """Play-sound presets for every bundled meme clip + random picks.
+
+    Leading chip drops a multi-page folder of every clip (see
+    ``preset=soundboard`` handling in the main window).
+    """
+    from . import sounds
+    entries: list = [
+        {"type": "open_folder", "label": "All sounds folder",
+         "params": {"preset": "soundboard"}},
+        {"type": "play_sound", "label": "Random Funny",
+         "params": {"clip": "random_funny"}},
+        {"type": "play_sound", "label": "Random Fart",
+         "params": {"clip": "random_fart"}},
+        {"type": "play_sound", "label": "Random Music",
+         "params": {"clip": "random_music"}},
+        {"type": "play_sound", "label": "Random Any",
+         "params": {"clip": "random"}},
+    ]
+    for clip in sounds.list_clips():
+        if not clip.get("path"):
+            continue
+        name = clip["name"]
+        entries.append({
+            "type": "play_sound",
+            "label": _short_sound_label(clip.get("label") or name, name),
+            "params": {"clip": name},
+        })
+    return entries
+
+
+def get_action_catalog() -> list:
+    """Full sidebar catalog, with Soundboard chips after Media."""
+    out: list = []
+    for cat, entries in _ACTION_CATALOG_CORE:
+        out.append((cat, entries))
+        if cat == "Media":
+            out.append(("Soundboard", soundboard_catalog_entries()))
+    return out
+
+
+# Snapshot for imports/tests; GUI rebuilds via get_action_catalog().
+ACTION_CATALOG = get_action_catalog()
+
+
+def catalog_entry_type(entry) -> str:
+    """Action type for a catalog entry (string or preset dict)."""
+    if isinstance(entry, str):
+        return entry
+    return str(entry.get("type", "") or "")
+
+
+def catalog_entry_label(entry) -> str:
+    """Sidebar label for a catalog entry."""
+    if isinstance(entry, str):
+        return ACTION_TYPES.get(entry, {}).get("label", entry)
+    label = entry.get("label")
+    if isinstance(label, str) and label.strip():
+        return label.strip()
+    t = catalog_entry_type(entry)
+    return ACTION_TYPES.get(t, {}).get("label", t)
+
+
+def catalog_entry_params(entry) -> dict:
+    """Default params applied when the entry is dropped onto a key."""
+    if isinstance(entry, str):
+        return {}
+    params = entry.get("params") or {}
+    return dict(params) if isinstance(params, dict) else {}
+
+
+def encode_catalog_drag(entry) -> str:
+    """Encode a catalog entry for MIME (no ':' — page id uses that separator).
+
+    Plain types stay bare (`volume`). Presets become `type?k=v&k2=v2`
+    (`monitor?metric=gpu`).
+    """
+    from urllib.parse import urlencode
+    t = catalog_entry_type(entry)
+    params = catalog_entry_params(entry)
+    if not params:
+        return t
+    # Stable order so tests and round-trips are predictable.
+    q = urlencode(sorted((str(k), str(v)) for k, v in params.items()))
+    return f"{t}?{q}"
+
+
+def parse_catalog_drag(token: str) -> tuple[str, dict]:
+    """Inverse of encode_catalog_drag → (action_type, params)."""
+    from urllib.parse import parse_qsl
+    token = (token or "").strip()
+    if not token:
+        return ("none", {})
+    atype, sep, query = token.partition("?")
+    atype = atype.strip() or "none"
+    if not sep:
+        return (atype, {})
+    params = {k: v for k, v in parse_qsl(query, keep_blank_values=True)}
+    return (atype, params)
 
 # A default library-icon name + label to auto-assign when an action is dropped.
 ACTION_DEFAULT_ICON = {
@@ -168,6 +339,7 @@ ACTION_DEFAULT_ICON = {
     "volume": ("volume_up", "Volume"),
     "play_sound": ("play", "Sound"),
     "close_app": ("power", "Close"),
+    "chatterino": ("camera", "Clip"),
     "next_page": ("next_page", "Next"),
     "prev_page": ("prev_page", "Prev"),
     "goto_page": ("next_page", "Page"),
@@ -211,32 +383,57 @@ def default_icon_for(action) -> tuple[str, str]:
         return ({"play-pause": "play", "next": "next", "previous": "prev",
                  "stop": "stop"}.get(_pick("cmd", "play-pause"), "play"), "Media")
     if t == "play_sound":
-        clip = _pick("clip", "bleep")
+        clip = _pick("clip", "bruh")
+        # Prefer the bundled index label (short), then known randoms / custom.
+        from . import sounds
+        for c in sounds.list_clips():
+            if c["name"] == clip:
+                return ("play", _short_sound_label(c.get("label") or clip, clip))
         labels = {
-            "bleep": "Bleep", "boop": "Boop", "airhorn": "Horn",
-            "fart_squeak": "Fart", "fart_wet": "Fart", "fart_long": "Fart",
-            "fart_trumpet": "Fart", "fart_tiny": "Fart",
-            "random_fart": "Fart?", "random_funny": "Random",
-            "random_music": "Jingle", "random": "Random",
-            "custom": "Sound", "circus": "Circus", "elevator": "Elevator",
-            "laugh": "Ha", "rimshot": "Ba-dum", "sad_trombone": "Wah",
+            "random_fart": "Fart?", "random_funny": "Funny?",
+            "random_music": "Jingle?", "random": "Random",
+            "custom": "Sound",
         }
-        return ("play", labels.get(clip, "Sound"))
+        return ("play", labels.get(clip, _short_sound_label(clip, "Sound")))
     if t == "brightness":
         return ({"up": "brightness_up", "down": "brightness_down",
                  "set": "brightness_up"}.get(_pick("mode", "set"), "brightness_up"), "Bright")
     if t == "obs_recording":
-        return ({"start": "play", "stop": "stop", "toggle": "stop"}
-                .get(_pick("cmd", "toggle"), "stop"), "Record")
+        return ({"start": ("play", "Record"), "stop": ("stop", "Stop Rec"),
+                 "toggle": ("stop", "Record")}
+                .get(_pick("cmd", "toggle"), ("stop", "Record")))
     if t == "obs_streaming":
-        return ({"start": "play", "stop": "stop", "toggle": "web"}
-                .get(_pick("cmd", "toggle"), "web"), "Stream")
+        return ({"start": ("web", "Go Live"), "stop": ("stop", "End Live"),
+                 "toggle": ("web", "Stream")}
+                .get(_pick("cmd", "toggle"), ("web", "Stream")))
     if t == "obs_mute":
         return ({"mute": "mute", "unmute": "mic", "toggle": "mute"}
-                .get(_pick("state", "toggle"), "mute"), "Mute")
+                .get(_pick("state", "toggle"), "mute"), "Mic Mute")
+    if t == "obs_scene":
+        scene = _pick("scene", "")
+        key = scene.strip().lower()
+        scene_faces = {
+            "starting soon": ("dot", "Soon"),
+            "brb": ("dot", "BRB"),
+            "be right back": ("dot", "BRB"),
+            "live": ("camera", "Live"),
+            "main": ("camera", "Live"),
+            "game capture": ("star", "Game"),
+            "game": ("star", "Game"),
+        }
+        if key in scene_faces:
+            return scene_faces[key]
+        short = scene.strip()[:10] if scene.strip() else "Scene"
+        return ("camera", short)
     if t == "obs_source":
         return ({"show": "dot", "hide": "dot", "toggle": "dot"}
                 .get(_pick("state", "toggle"), "dot"), "Source")
+    if t == "chatterino":
+        cmd = _pick("command", "/clip").strip() or "/clip"
+        if cmd.lstrip("/").lower() == "clip":
+            return ("camera", "Clip")
+        short = cmd if len(cmd) <= 10 else cmd[:9] + "…"
+        return ("camera", short)
     return ACTION_DEFAULT_ICON.get(t, ("", ""))
 
 
@@ -528,6 +725,153 @@ def _close_app(target: str) -> None:
         log.warning("close needs 'wmctrl' or 'pkill'")
 
 
+def _run_out(argv: list[str], timeout: float = 5.0) -> str:
+    """Run a command and return stdout (empty string on failure)."""
+    try:
+        return subprocess.check_output(
+            argv, stderr=subprocess.DEVNULL, timeout=timeout,
+            text=True).strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _kwin_activate_class(wm_class: str) -> bool:
+    """Activate a window by resourceClass via a short KWin script (Plasma Wayland)."""
+    qdbus = "qdbus6" if _has("qdbus6") else ("qdbus" if _has("qdbus") else "")
+    if not qdbus:
+        return False
+    # Escape for embedding in a JS string literal.
+    cls = wm_class.replace("\\", "\\\\").replace('"', '\\"')
+    # Plasma 5 used clientList/activeClient; Plasma 6 uses windowList/activeWindow.
+    script = f"""
+var cls = "{cls}".toLowerCase();
+function matchWin(c) {{
+    var rc = (c.resourceClass || "").toString().toLowerCase();
+    var rn = (c.resourceName || "").toString().toLowerCase();
+    var cap = (c.caption || "").toString().toLowerCase();
+    return rc === cls || rn === cls || rc.indexOf(cls) >= 0
+        || rn.indexOf(cls) >= 0 || cap.indexOf(cls) >= 0;
+}}
+var list = (typeof workspace.windowList === "function")
+    ? workspace.windowList() : workspace.clientList();
+for (var i = 0; i < list.length; ++i) {{
+    var c = list[i];
+    if (!matchWin(c)) continue;
+    if (typeof workspace.activeWindow !== "undefined")
+        workspace.activeWindow = c;
+    else
+        workspace.activeClient = c;
+    break;
+}}
+"""
+    path = None
+    try:
+        import tempfile
+        fd, path = tempfile.mkstemp(prefix="fifine-kwin-", suffix=".js")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(script)
+        sid = _run_out([
+            qdbus, "org.kde.KWin", "/Scripting",
+            "org.kde.kwin.Scripting.loadScript", path,
+        ])
+        if not sid.isdigit():
+            return False
+        base = f"/Scripting/Script{sid}"
+        _run([qdbus, "org.kde.KWin", base, "org.kde.kwin.Script.run"],
+             stderr=subprocess.DEVNULL)
+        _run([qdbus, "org.kde.KWin", base, "org.kde.kwin.Script.stop"],
+             stderr=subprocess.DEVNULL)
+        _run([qdbus, "org.kde.KWin", "/Scripting",
+              "org.kde.kwin.Scripting.unloadScript", sid],
+             stderr=subprocess.DEVNULL)
+        return True
+    except Exception:
+        log.debug("KWin activate failed", exc_info=True)
+        return False
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+def _focus_app_window(hint: str) -> bool:
+    """Best-effort focus a window by class/title (Chatterino, etc.)."""
+    hint = (hint or "").strip()
+    if not hint:
+        return False
+    # X11 / XWayland via xdotool.
+    if _has("xdotool"):
+        for flag in ("--class", "--classname", "--name"):
+            ids = _run_out(["xdotool", "search", "--onlyvisible", flag, hint])
+            wid = ids.splitlines()[0].strip() if ids else ""
+            if wid.isdigit():
+                _run(["xdotool", "windowactivate", "--sync", wid],
+                     stderr=subprocess.DEVNULL)
+                return True
+    if _has("wmctrl"):
+        # -xa matches WM_CLASS; fall back to title substring (-a).
+        for args in (["wmctrl", "-xa", hint], ["wmctrl", "-a", hint]):
+            try:
+                r = subprocess.run(args, stderr=subprocess.DEVNULL,
+                                   timeout=5, env=child_env())
+                if r.returncode == 0:
+                    return True
+            except (OSError, subprocess.SubprocessError):
+                pass
+    # Hyprland.
+    if _has("hyprctl"):
+        out = _run_out(["hyprctl", "clients", "-j"])
+        if out:
+            try:
+                import json
+                clients = json.loads(out)
+            except (json.JSONDecodeError, TypeError):
+                clients = []
+            want = hint.casefold()
+            for c in clients if isinstance(clients, list) else []:
+                cls = str(c.get("class") or "")
+                title = str(c.get("title") or "")
+                if want in cls.casefold() or want in title.casefold():
+                    addr = c.get("address")
+                    if addr:
+                        _run(["hyprctl", "dispatch", "focuswindow",
+                              f"address:{addr}"],
+                             stderr=subprocess.DEVNULL)
+                        return True
+    # KDE Plasma Wayland (and X11) via KWin scripting.
+    if _kwin_activate_class(hint):
+        return True
+    return False
+
+
+def _chatterino_command(command: str = "/clip",
+                        window: str = "chatterino") -> None:
+    """Focus Chatterino and run a chat command (default: /clip).
+
+    Chatterino's built-in ``/clip`` creates a Twitch clip of the current
+    channel. We activate the Chatterino window, then type the command + Enter
+    through the same keystroke backend as Type text / Hotkey.
+    """
+    cmd = (command or "/clip").strip() or "/clip"
+    if not cmd.startswith("/"):
+        cmd = "/" + cmd
+    win = (window or "chatterino").strip() or "chatterino"
+    if not KEY_TOOL:
+        log.warning("Chatterino command needs xdotool / ydotool / wtype; "
+                    "nothing was typed")
+        return
+    if not _focus_app_window(win):
+        log.warning(
+            "Chatterino window %r not found — open Chatterino (and focus a "
+            "Twitch channel split) then press the key again", win)
+        return
+    # Give the compositor a beat to finish the focus change before typing.
+    time.sleep(0.2)
+    _type_text(cmd + "\n")
+
+
 def _media(cmd: str) -> None:
     if HAS_PLAYERCTL:
         _run(["playerctl", cmd], stderr=subprocess.DEVNULL)
@@ -535,9 +879,17 @@ def _media(cmd: str) -> None:
         log.warning("media control needs 'playerctl'")
 
 
-def _play_sound(clip: str, file_path: str = "", volume: str = "80") -> None:
+def _play_sound(clip: str, file_path: str = "", volume: str = "80",
+                context: ActionContext | None = None) -> None:
     from . import sounds
-    sounds.play(clip or "bleep", file_path or "", volume or "80")
+    sink, also_default = "", True
+    if context is not None:
+        try:
+            sink, also_default = context.sound_output()
+        except Exception as e:  # noqa: BLE001
+            log.debug("sound_output unavailable: %s", e)
+    sounds.play(clip or "bruh", file_path or "", volume or "80",
+                sink=sink or "", also_default=bool(also_default))
 
 
 SINK = "@DEFAULT_AUDIO_SINK@"
@@ -610,13 +962,139 @@ def _obs_request(context: ActionContext | None, request_type: str,
     return obs_ws.call(host, port, password, request_type, request_data)
 
 
+# Scene-name aliases so chips like "BRB" / "Starting Soon" still hit common
+# OBS scene titles (case and punctuation ignored).
+_OBS_SCENE_ALIASES: dict[str, tuple[str, ...]] = {
+    "starting soon": (
+        "starting soon", "startingsoon", "soon", "intro", "be right back soon",
+        "starting", "countdown",
+    ),
+    "brb": ("brb", "be right back", "be-right-back", "away", "brb."),
+    "live": ("live", "main", "stream", "on air", "onair", "program"),
+    "game capture": (
+        "game capture", "game", "gaming", "gameplay", "game scene", "in game",
+    ),
+}
+
+_OBS_MIC_ALIASES: tuple[str, ...] = (
+    "mic/aux", "mic", "microphone", "mic aux", "analog mic", "usb mic",
+    "headset", "voice",
+)
+
+
+def _norm_obs_name(name: str) -> str:
+    return "".join(ch for ch in name.casefold() if ch.isalnum())
+
+
+def _match_obs_name(wanted: str, candidates: list[str],
+                    alias_groups: dict[str, tuple[str, ...]] | None = None
+                    ) -> str | None:
+    """Pick the best OBS scene/input name for a chip label / configured value."""
+    wanted = (wanted or "").strip()
+    if not wanted or not candidates:
+        return None
+    # Exact, then case-insensitive.
+    for n in candidates:
+        if n == wanted:
+            return n
+    low = wanted.casefold()
+    for n in candidates:
+        if n.casefold() == low:
+            return n
+    want_n = _norm_obs_name(wanted)
+    for n in candidates:
+        if _norm_obs_name(n) == want_n:
+            return n
+    # Alias group: wanted maps to a group; first candidate in that group wins.
+    if alias_groups:
+        group_keys = []
+        for key, aliases in alias_groups.items():
+            pool = (_norm_obs_name(key),) + tuple(_norm_obs_name(a) for a in aliases)
+            if want_n in pool or any(want_n == a or a in want_n or want_n in a
+                                     for a in pool if a):
+                group_keys.append(key)
+        for key in group_keys or ():
+            aliases = alias_groups[key]
+            norms = {_norm_obs_name(key), *(_norm_obs_name(a) for a in aliases)}
+            for n in candidates:
+                nn = _norm_obs_name(n)
+                if nn in norms or any(a and (a in nn or nn in a) for a in norms):
+                    return n
+    # Substring fallback (e.g. "Game" → "Game Capture").
+    for n in candidates:
+        nl = n.casefold()
+        if low in nl or nl in low:
+            return n
+    return None
+
+
+def _resolve_obs_scene_name(context: ActionContext | None, wanted: str
+                            ) -> str | None:
+    """Map a chip scene label to a real OBS scene name when possible."""
+    wanted = (wanted or "").strip()
+    if not wanted:
+        return None
+    data = _obs_request(context, "GetSceneList")
+    if data is None:
+        # OBS unreachable — still try the configured name (same as before).
+        return wanted
+    names = [
+        str(s.get("sceneName"))
+        for s in (data.get("scenes") or [])
+        if isinstance(s, dict) and s.get("sceneName")
+    ]
+    if not names:
+        return wanted
+    matched = _match_obs_name(wanted, names, _OBS_SCENE_ALIASES)
+    if matched is None:
+        log.warning("OBS: no scene matching %r (have: %s)",
+                    wanted, ", ".join(names[:16]))
+        return None
+    if matched != wanted:
+        log.info("OBS: resolved scene %r → %r", wanted, matched)
+    return matched
+
+
+def _resolve_obs_input_name(context: ActionContext | None, wanted: str
+                            ) -> str | None:
+    """Map Mic/Aux (etc.) to a real OBS input when names differ."""
+    wanted = (wanted or "").strip()
+    if not wanted:
+        return None
+    data = _obs_request(context, "GetInputList")
+    if data is None:
+        return wanted
+    names = [
+        str(i.get("inputName"))
+        for i in (data.get("inputs") or [])
+        if isinstance(i, dict) and i.get("inputName")
+    ]
+    if not names:
+        return wanted
+    aliases = {"mic/aux": _OBS_MIC_ALIASES, "mic": _OBS_MIC_ALIASES}
+    matched = _match_obs_name(wanted, names, aliases)
+    if matched is None and _norm_obs_name(wanted) in {
+            _norm_obs_name(a) for a in _OBS_MIC_ALIASES}:
+        matched = _match_obs_name("Mic/Aux", names, aliases)
+    if matched is None:
+        log.warning("OBS: no input matching %r (have: %s)",
+                    wanted, ", ".join(names[:16]))
+        return None
+    if matched != wanted:
+        log.info("OBS: resolved input %r → %r", wanted, matched)
+    return matched
+
+
 def _obs_scene(context: ActionContext | None, scene: str, *, preview: bool = False) -> None:
     scene = (scene or "").strip()
     if not scene:
         log.warning("OBS scene action has no scene name")
         return
+    resolved = _resolve_obs_scene_name(context, scene)
+    if not resolved:
+        return
     req = "SetCurrentPreviewScene" if preview else "SetCurrentProgramScene"
-    _obs_request(context, req, {"sceneName": scene})
+    _obs_request(context, req, {"sceneName": resolved})
 
 
 def _obs_transition(context: ActionContext | None) -> None:
@@ -631,17 +1109,21 @@ def _obs_source(context: ActionContext | None, scene: str, source: str,
     if not scene or not source:
         log.warning("OBS source action needs both scene and source names")
         return
+    resolved_scene = _resolve_obs_scene_name(context, scene)
+    if not resolved_scene:
+        return
     info = _obs_request(context, "GetSceneItemId",
-                        {"sceneName": scene, "sourceName": source})
+                        {"sceneName": resolved_scene, "sourceName": source})
     if info is None:
         return
     item_id = info.get("sceneItemId")
     if item_id is None:
-        log.warning("OBS: no scene item id for %r in scene %r", source, scene)
+        log.warning("OBS: no scene item id for %r in scene %r",
+                    source, resolved_scene)
         return
     if state == "toggle":
         cur = _obs_request(context, "GetSceneItemEnabled",
-                           {"sceneName": scene, "sceneItemId": item_id})
+                           {"sceneName": resolved_scene, "sceneItemId": item_id})
         if cur is None:
             return
         enabled = not bool(cur.get("sceneItemEnabled", True))
@@ -653,7 +1135,7 @@ def _obs_source(context: ActionContext | None, scene: str, source: str,
         log.warning("OBS source state must be show/hide/toggle, got %r", state)
         return
     _obs_request(context, "SetSceneItemEnabled",
-                 {"sceneName": scene, "sceneItemId": item_id,
+                 {"sceneName": resolved_scene, "sceneItemId": item_id,
                   "sceneItemEnabled": enabled})
 
 
@@ -672,6 +1154,20 @@ def _obs_output(context: ActionContext | None, kind: str, cmd: str) -> None:
     if not req:
         log.warning("OBS %s cmd must be start/stop/toggle, got %r", kind, cmd)
         return
+    # Avoid no-op failures when already streaming/recording (OBS returns an
+    # error for Start* while active, which looked like a broken chip).
+    if cmd in ("start", "stop"):
+        status_req = ("GetStreamStatus" if kind == "streaming"
+                      else "GetRecordStatus")
+        status = _obs_request(context, status_req)
+        if status is not None:
+            active = bool(status.get("outputActive"))
+            if cmd == "start" and active:
+                log.info("OBS %s already active — skipping start", kind)
+                return
+            if cmd == "stop" and not active:
+                log.info("OBS %s already stopped — skipping stop", kind)
+                return
     _obs_request(context, req)
 
 
@@ -681,11 +1177,14 @@ def _obs_mute(context: ActionContext | None, input_name: str, state: str) -> Non
     if not input_name:
         log.warning("OBS mute action has no input name")
         return
+    resolved = _resolve_obs_input_name(context, input_name)
+    if not resolved:
+        return
     if state == "toggle":
-        _obs_request(context, "ToggleInputMute", {"inputName": input_name})
+        _obs_request(context, "ToggleInputMute", {"inputName": resolved})
     elif state in ("mute", "unmute"):
         _obs_request(context, "SetInputMute",
-                     {"inputName": input_name, "inputMuted": state == "mute"})
+                     {"inputName": resolved, "inputMuted": state == "mute"})
     else:
         log.warning("OBS mute state must be mute/unmute/toggle, got %r", state)
 
@@ -713,7 +1212,13 @@ def execute(action, context: ActionContext | None = None,
         elif t == "hotkey":
             _send_hotkey(p.get("keys", ""))
         elif t == "text":
-            _type_text(p.get("text", ""))
+            # Optional trailing Return — useful for chat boxes where Enter
+            # sends the message. Default is off so existing chips keep typing
+            # only. A real newline is what _type_text turns into Return.
+            text = p.get("text", "")
+            if str(p.get("press_enter", "no")).lower() in ("yes", "true", "1", "on"):
+                text = text + "\n"
+            _type_text(text)
         elif t == "password":
             from . import secret_store
             pw = p.get("password") or (
@@ -738,10 +1243,13 @@ def execute(action, context: ActionContext | None = None,
         elif t == "volume":
             _volume(p.get("cmd", "up"), p.get("step", "5"))
         elif t == "play_sound":
-            _play_sound(p.get("clip", "bleep"), p.get("file", ""),
-                        p.get("volume", "80"))
+            _play_sound(p.get("clip", "bruh"), p.get("file", ""),
+                        p.get("volume", "80"), context)
         elif t == "close_app":
             _close_app(p.get("target", ""))
+        elif t == "chatterino":
+            _chatterino_command(p.get("command", "/clip"),
+                                p.get("window", "chatterino"))
         elif t == "monitor":
             return    # display-only key: pressing it does nothing
         elif t == "sleep_screen" and context:
