@@ -77,32 +77,47 @@ expectations:
   fires after long-pressing the key (~0.5 s).
 - **OBS Studio** (obs-websocket v5, OBS 28+): switch scenes, show/hide sources,
   start/stop/toggle recording and streaming, mute inputs, and fire a studio-mode
-  transition. Configure the connection once under **Options → OBS settings…**
-  (host, port, password). Enable the server in OBS under
-  *Tools → WebSocket Server Settings* (default port 4455). A brand-new install
-  ships with **Streaming**, **Recording**, and **General** folders already set
-  up (mic mute, stream, record, stream+record, …).
+  transition. The **OBS** sidebar has chips for **Go Live**, **End Stream**,
+  **Record**, **Starting Soon**, **BRB**, **Live**, **Game Capture**, and
+  **Mic Mute**. Scene/mic names are matched flexibly against OBS (so `BRB`
+  still hits “Be Right Back”). Configure the connection under **Options → OBS
+  settings…**. Enable the server in OBS under *Tools → WebSocket Server
+  Settings* (default port 4455). New installs ship **Streaming**, **Recording**,
+  **Scenes**, and **General** folders already set up.
+- **Twitch clip via Chatterino** — the **Create clip** chip focuses Chatterino
+  and runs `/clip` (Twitch clip of the current channel). Keep Chatterino open
+  on your stream channel; needs `ydotool`, `wtype`, or `xdotool`.
 - **Minimize to taskbar** (Ctrl+M), **hide to background** (✕ / Ctrl+W — keys
   stay active; Quit is Ctrl+Q), and a **system tray** icon when the desktop
   provides one (Options → Show in system tray; on by default). **Create folder…**
   (Ctrl+Shift+F) turns a key into a named folder of shortcuts (toolbar, Options
   menu, right-click a key, or drop **Open folder** from the catalog).
-- **Play sound** — built-in comedy clips (bleeps for censoring, farts, airhorn,
-  laugh, rimshot, sad trombone, circus/elevator/kazoo jingles, …), or any
-  WAV/MP3/OGG on disk. Sounds mix when you mash keys. New installs include a
-  **Sounds** soundboard folder. Needs `pw-play` / `paplay` (PipeWire/Pulse) or
-  `ffplay` / `mpv`.
+- **Play sound / Soundboard** — bundled **MyInstants meme clips** (bruh, vine
+  boom, WTF boom, TikTok India, LoZ item get, …), or any WAV/MP3/OGG on disk.
+  The sidebar **Soundboard** tab has a drag chip per clip (plus random picks)
+  and an **All sounds folder** chip that drops a multi-page Memes folder.
+  Sounds mix when you mash keys. New installs include a multi-page **Memes**
+  folder. Needs `pw-play` / `paplay` (PipeWire/Pulse) or `ffplay` / `mpv`.
+  For stream capture, set **Options → Soundboard audio…** to a sink OBS
+  records (or a null sink), and leave “Also play on default output” on so you
+  still hear clips locally.
 - **System-monitor keys** — a key can show live **CPU, RAM, VRAM, GPU load,
-  GPU/CPU temperatures, network or disk-space** readouts (like the official
-  app's widgets) — or a **clock** (12h/24h, optional seconds and date) — as a
-  big number, a gauge (a network key falls
-  back to the number face), or a scrolling graph, with a configurable refresh
-  interval. Keys showing the same metric share one sample stream. Temperature
-  keys pick the CPU package sensor by default; the target field selects any
-  other `psutil` sensor as `chip` or `chip:label` (e.g. `nvme:Composite`).
-  VRAM and GPU load are best-effort per GPU vendor (NVIDIA via NVML — needs
-  `python3-pynvml`; AMD via sysfs; Intel iGPUs share system RAM so there is
-  nothing to show).
+  GPU/CPU temperatures, CPU/GPU power (watts), process RAM, Twitch viewers /
+  stream uptime, network or disk-space** readouts (like the official app's
+  widgets) — or a **clock** (12h/24h, optional seconds and date) — as a big
+  number, a gauge (a network key falls back to the number face), or a scrolling
+  graph, with a configurable refresh interval. Keys showing the same metric
+  share one sample stream. Temperature keys pick the CPU package sensor by
+  default; the target field selects a disk mount, network iface, `psutil` temp
+  sensor (`chip` / `chip:label`, e.g. `nvme:Composite`), a process name for
+  **process RAM** (`procram`), or a Twitch login for **`twitchviewers`** /
+  **`twitchuptime`**. Twitch needs **Options → Twitch settings…** (Client-ID +
+  Client Secret from [dev.twitch.tv/console](https://dev.twitch.tv/console)).
+  CPU power uses RAPL; GPU power uses NVML or AMD hwmon. VRAM and GPU load are
+  best-effort per GPU vendor (NVIDIA via NVML — needs `python3-pynvml`; AMD via
+  sysfs). On hybrid NVIDIA+AMD machines, dedicated **iGPU usage / VRAM /
+  wattage** metrics read the non-NVIDIA DRM card so they stay on the APU.
+  Intel iGPUs share system RAM so there is no dedicated iGPU VRAM counter.
 - **Knob/dial support** (press / rotate-left / rotate-right) on devices that
   have dials.
 - **Composable by design** — the *Run shell command* action turns any script
@@ -110,8 +125,10 @@ expectations:
   [offline voice dictation on a key](contrib/dictation/) (press, speak in
   English or French, press — your words type themselves).
 - Multiple **profiles**, each with multiple **pages**, plus **folders** —
-  drop an *Open folder* action on a key, double-click it in the editor to go
+  drop an *Open folder* action on a key, drag other keys (including sound
+  clips) onto a folder to move them inside, double-click it in the editor to go
   in (a **Back** key returns); folders can nest and have their own pages.
+  Right-click a folder key → **Move to page** to relocate it to another page.
 - Three-pane configuration GUI (actions catalog · live device grid · key
   settings) with a dark theme matching the original; system tray when the
   session exposes a StatusNotifier host.
@@ -182,11 +199,12 @@ Mint 21+ and newer). The bundled USB transport library needs only glibc ≥ 2.17
 so it runs on essentially any current release.
 
 This installs the app, a desktop launcher (**fifine Control Deck** appears in
-your app menu), the icon, and the udev rule. Make sure you're in the `plugdev`
-group, then unplug/replug the device once:
+your app menu), the icon, and the udev rule. Unplug/replug the device once (or
+run `sudo udevadm trigger`). Seat `uaccess` grants access; on Debian/Ubuntu
+you can optionally also join `plugdev` if that group exists:
 
 ```bash
-sudo usermod -aG plugdev "$USER"   # then log out/in if it was just added
+sudo usermod -aG plugdev "$USER"   # Debian/Ubuntu only; then log out/in
 ```
 
 To build the `.deb` yourself: `./packaging/build-deb.sh` → `dist/`.
@@ -215,7 +233,10 @@ fifine-control-deck`.
    sudo ./packaging/install-udev.sh
    ```
 
-   Then **unplug and replug** the device. You must be in the `plugdev` group.
+   Then **unplug and replug** the device (or `udevadm trigger`). Access is granted
+   via the seat `uaccess` ACL — you do **not** need a `plugdev` group (Arch /
+   CachyOS / Fedora usually have none). On Debian/Ubuntu, `plugdev` is an
+   optional extra if that group exists.
 
 2. **Run the app:**
 
