@@ -12,7 +12,25 @@ follows [Semantic Versioning](https://semver.org/).
   folder on page 1 (Stream Deck–style). Leftover Prev chips in folders are
   cleared on launch.
 
+### Changed
+- **Main window size and position are remembered** across launches (including
+  maximized state and multi-monitor placements).
+
 ### Added
+- **KDE power profile chips** (sidebar **Power**): Performance, Balanced,
+  Power Saver, and Cycle. Uses `powerprofilesctl` / power-profiles-daemon
+  (same profiles as Plasma’s battery applet).
+- **Twitch chat page mode.** Set **Page mode → Twitch chat** and a channel
+  login to turn that whole page into a live chat view: the main window shows a
+  full chat panel, and the deck keys show the same feed. Uses anonymous Twitch
+  IRC (read-only, no extra OAuth). Switch back to **Keys** for the normal grid.
+  **Double-press the top-left key** (or the window’s ← Chips button) to jump
+  back to a normal chip/keys page. Long messages **marquee-scroll** on the
+  chip so the full line stays readable.
+- **Photo / GIF page mode.** Set **Page mode → Photo / GIF** and choose an
+  image or animated GIF: it is cover-cropped and spread across all deck keys
+  (GIFs animate in sync on the keys and in the window preview). Same
+  double-tap / ← Chips back to a keys page.
 - **Soundboard audio routing** (Options → **Soundboard audio…**): play clips
   to a chosen PipeWire/Pulse sink so OBS can capture them, with optional
   dual-play to the default output so you still hear them on headphones. Test
