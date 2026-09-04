@@ -94,6 +94,11 @@ class DeckController:
         # metric read (a stalling disk, a sick GPU driver) can never delay
         # actions or the SDK reader.
         self._sampler = monitors.Sampler()
+        try:
+            from . import twitch
+            twitch.set_creds_provider(self.twitch_credentials)
+        except Exception:
+            log.debug("twitch creds provider not wired", exc_info=True)
         self._monitor_state: dict[int, tuple] = {}  # key index -> (last_t, signature)
         self._holds: dict[int, _PendingHold] = {}   # key index -> in-flight long-press
         self._monitor_stop = threading.Event()
@@ -494,6 +499,7 @@ class DeckController:
         self.render_page()
 
     def go_back(self) -> None:
+        """Exit the current folder to its parent (always leaves the folder)."""
         with self._lock:
             if not self._nav:
                 return
@@ -501,6 +507,20 @@ class DeckController:
             self._container = container
             self.page_index = page_index
         self.render_page()
+
+    def folder_back(self) -> None:
+        """Back key inside a folder: previous page, or exit on the first page."""
+        with self._lock:
+            if self._nav and self.page_index > 0:
+                n = len(self.container().pages)
+                self.page_index = max(0, min(self.page_index - 1, n - 1))
+            elif self._nav:
+                container, page_index = self._nav.pop()
+                self._container = container
+                self.page_index = page_index
+            else:
+                return
+        self.render_page()  # also fires on_page_changed
 
     def reset_nav(self) -> None:
         """Return to the root of the active profile (used on profile switch)."""
@@ -972,7 +992,10 @@ class DeckController:
         if not action or action.type == "none":
             return
         if action.type == "folder_back":
-            self._enqueue(self.go_back)
+            # Stream Deck–style: Back goes to the previous folder page when
+            # there is one; only exits the folder on page 1. Avoids a separate
+            # Prev key doubling up with Back inside multi-page folders.
+            self._enqueue(self.folder_back)
         else:
             self._enqueue(lambda a=action: actions.execute(a, self))
 
@@ -1136,6 +1159,13 @@ class DeckController:
     def prev_profile(self) -> None:
         self._rotate_profile(-1)
 
+    def sound_output(self) -> tuple[str, bool]:
+        """PipeWire/Pulse sink name and also-default flag for soundboard plays."""
+        cfg = self.config
+        sink = getattr(cfg, "sound_sink", "") or ""
+        also = bool(getattr(cfg, "sound_also_default", True))
+        return sink, also
+
     def obs_connection(self) -> tuple[str, int, str]:
         """Host, port, and password for OBS WebSocket (Options → OBS settings)."""
         cfg = self.config
@@ -1156,6 +1186,23 @@ class DeckController:
         if not password:
             password = getattr(cfg, "obs_password", "") or ""
         return host, port, password
+
+    def twitch_credentials(self) -> tuple[str, str]:
+        """Client-ID and Client Secret for Twitch Helix (Options → Twitch)."""
+        cfg = self.config
+        client_id = getattr(cfg, "twitch_client_id", "") or ""
+        secret = ""
+        sid = getattr(cfg, "twitch_secret_id", "") or ""
+        if sid:
+            from . import secret_store
+            secret = secret_store.get(sid) or ""
+            if not secret:
+                log.warning(
+                    "Twitch Client Secret %s unavailable (keyring locked or "
+                    "empty); trying cleartext fallback", sid)
+        if not secret:
+            secret = getattr(cfg, "twitch_client_secret", "") or ""
+        return client_id, secret
 
     def sleep_screen(self) -> None:
         with self._lock:
