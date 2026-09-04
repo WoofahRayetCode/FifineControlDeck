@@ -6,7 +6,63 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Folder Prev + Back no longer double up.** Inside multi-page folders only
+  **Next** is auto-placed; **Back** goes to the previous page, and exits the
+  folder on page 1 (Stream Deck–style). Leftover Prev chips in folders are
+  cleared on launch.
+
 ### Added
+- **Soundboard audio routing** (Options → **Soundboard audio…**): play clips
+  to a chosen PipeWire/Pulse sink so OBS can capture them, with optional
+  dual-play to the default output so you still hear them on headphones. Test
+  button included. Tip: `pactl load-module module-null-sink sink_name=Soundboard`.
+- **Create clip** chip (Twitch sidebar) runs Chatterino’s `/clip` command:
+  focuses the Chatterino window (X11 xdotool/wmctrl, KDE KWin script, or
+  Hyprland), then types `/clip` + Enter. Generic **Chatterino command** action
+  can run other `/…` commands. Needs Chatterino open on a Twitch channel and a
+  keystroke tool (`ydotool` / `wtype` / `xdotool`).
+- **OBS stream chips** with clearer labels: Go Live, End Stream, Record, Stop
+  Record, Starting Soon, BRB, Live, Game Capture, Mic Mute (OBS sidebar +
+  starter Scenes / Streaming / Recording folders). Scene and mic names are
+  resolved against OBS (case / alias tolerant), and Start/Stop skip no-op
+  errors when the output is already in that state.
+- **Prev / Next page chips by position** on multi-page boards (profile pages
+  and folders): first page gets **Next**, last gets **Prev**, middle pages get
+  both (keys 13/14). Applied on launch and when adding, deleting, or reordering
+  pages. Empty or existing nav slots only — custom keys on those slots are kept.
+- **Soundboard** sidebar tab with a drag chip per bundled meme clip (plus
+  Random Funny / Fart / Music / Any), and an **All sounds folder** chip that
+  drops a multi-page Memes folder of every clip (Prev/Next/Back included).
+  Dropping a clip chip creates a Play sound key with that clip and a short
+  label already set. Generic **Play sound** stays under Media for custom files.
+- **Drag keys into folders.** Dropping a key (including Play sound clips) onto
+  an Open-folder key moves it into the first empty slot inside that folder and
+  clears the source — Stream Deck–style. Dropping onto a normal key still
+  swaps. Nesting a folder into itself is refused; a full folder warns.
+- **System tab monitor chips** for GPU usage, GPU VRAM, GPU wattage, GPU temp,
+  **iGPU usage / VRAM / wattage / temp** (AMD integrated GPU on hybrid
+  machines), CPU wattage, CPU temp, RAM usage, and Game process RAM (plus the
+  generic System monitor). Dragging a chip drops a monitor key with that
+  metric pre-selected; set the process name Target for Game process RAM. iGPU
+  keys read the non-NVIDIA DRM card so they stay on the APU when an NVIDIA
+  dGPU is also present.
+- **Delete** on a key chip's right-click menu. Same wipe as **Clear key** in
+  the editor (folder contents still prompt for confirmation). Disabled when
+  the key is already empty.
+- **Move folder to another page** from a folder key's right-click menu
+  (**Move to page → …**). Places the folder on the first empty slot of the
+  chosen page (profile pages or pages inside another folder), then switches
+  to that page. Warns if the target page is full.
+- **System monitor metrics:** process RAM (`procram`, set Target to a process
+  name / executable), CPU package power (`cpupower`, RAPL `energy_uj`), and
+  GPU board power (`gpupower`, NVML or AMD hwmon `power1_*`). Existing CPU,
+  RAM, VRAM, GPU load, and GPU temperature metrics are unchanged.
+- **Twitch monitor metrics:** `twitchviewers` (live viewer count) and
+  `twitchuptime` (how long the stream has been live). Set Target to the
+  channel login. Configure Client-ID + Client Secret under **Options →
+  Twitch settings…** (Helix App Access Token via client credentials; secret
+  prefers the OS keyring). Offline channels show `offline`.
 - **System tray by default** when the desktop provides a StatusNotifier host
   (e.g. KDE Plasma). New Options → **Show in system tray** preference
   (`show_tray` in config; default on). Close/hide keeps keys active; left-click
@@ -26,6 +82,15 @@ follows [Semantic Versioning](https://semver.org/).
   window on the panel; Hide to background remains a separate action. Close /
   Hide copy now spells out that keys stay active and Quit is Ctrl+Q.
 
+### Fixed
+- **Device access on Arch / CachyOS / Fedora.** The udev rule put
+  `GROUP="plugdev"` on the same line as `TAG+="uaccess"`. Those distros have
+  no `plugdev` group, so udev ignored the whole line, left `/dev/hidraw*` as
+  `root:root 0600`, and the app logged "device opened but returned no
+  firmware". `TAG+="uaccess"` is now on its own MODE line (Steam-style);
+  `GROUP="plugdev"` is optional on separate lines. `root-setup.sh` falls back
+  to the `input` group and an immediate ACL for the invoking user.
+
 ### Changed
 - **Start on login** autostart Exec prefers `~/.local/bin/fifine-control-deck`
   when that launcher exists (programs-menu / AppImage install), so rebuilding
@@ -40,11 +105,13 @@ follows [Semantic Versioning](https://semver.org/).
 - **OBS starter layout** for brand-new configs: Streaming, Recording, and
   General folders (mic mute, stream, record, stream+record, stop all, sample
   scenes). Existing configs are not changed.
-- **Play sound** action with a built-in comedy library (censor bleep, airhorn,
-  fart variants, laugh, rimshot, sad trombone, circus/elevator/kazoo jingles,
-  slide whistle, …), custom file paths, volume, and random picks. Overlapping
-  presses mix. Brand-new configs get a **Sounds** soundboard folder plus
-  quick Random Fart / Random Jingle keys.
+- **Play sound** — bundled **MyInstants-only** meme library (bruh, vine boom,
+  WTF boom, TikTok India, LoZ item get, …), custom file paths, volume, and
+  random picks. Overlapping presses mix. Brand-new configs get a multi-page
+  **Memes** folder (Prev/Next) plus Random Funny / Fart / Music keys.
+  Fetch/convert helpers live under `tools/make_*.py`; sources are listed in
+  `NOTICE`. All original synthesised comedy WAVs (bleep, airhorn, farts,
+  jingles, …) were removed.
 
 ## [0.12.9] - 2026-07-26
 
