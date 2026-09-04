@@ -68,12 +68,14 @@ def test_apply_page_nav_keys_first_middle_last():
     from fifine_deck.starter_layout import apply_page_nav_keys
     pages = [Page(name="A"), Page(name="B"), Page(name="C")]
     apply_page_nav_keys(pages)
-    assert pages[0].keys[14].action.type == "next_page"
+    # Root: Next on bottom-right (15), not 14.
+    assert pages[0].keys[15].action.type == "next_page"
+    assert 14 not in pages[0].keys or pages[0].keys[14].is_empty()
     assert 13 not in pages[0].keys or pages[0].keys[13].is_empty()
     assert pages[1].keys[13].action.type == "prev_page"
-    assert pages[1].keys[14].action.type == "next_page"
+    assert pages[1].keys[15].action.type == "next_page"
     assert pages[2].keys[13].action.type == "prev_page"
-    assert 14 not in pages[2].keys or pages[2].keys[14].is_empty()
+    assert 15 not in pages[2].keys or pages[2].keys[15].is_empty()
 
 
 def test_folder_page_nav_has_next_but_never_prev():
@@ -87,6 +89,7 @@ def test_folder_page_nav_has_next_but_never_prev():
     for pg in pages:
         prev = pg.keys.get(13)
         assert prev is None or prev.is_empty()
+    # Folders keep Next on 14 so Back can own 15.
     assert pages[0].keys[14].action.type == "next_page"
     assert pages[1].keys[14].action.type == "next_page"
     assert 14 not in pages[2].keys or pages[2].keys[14].is_empty()
@@ -113,11 +116,26 @@ def test_apply_page_nav_preserves_user_keys_on_nav_slots():
     from fifine_deck.model import Action, KeyConfig, Page
     from fifine_deck.starter_layout import apply_page_nav_keys
     pages = [Page(name="A"), Page(name="B")]
-    pages[0].keys[14] = KeyConfig(
+    # User key on the root Next slot (15) must not be overwritten.
+    pages[0].keys[15] = KeyConfig(
         label="Mine", action=Action("hotkey", {"keys": "a"}))
     apply_page_nav_keys(pages)
-    assert pages[0].keys[14].action.type == "hotkey"
-    assert pages[0].keys[14].label == "Mine"
+    assert pages[0].keys[15].action.type == "hotkey"
+    assert pages[0].keys[15].label == "Mine"
+
+
+def test_apply_page_nav_clears_duplicate_next_on_old_slot():
+    """Root Next lives on 15; a leftover Next on 14 must be cleared."""
+    from fifine_deck.model import Action, KeyConfig, Page
+    from fifine_deck.starter_layout import apply_page_nav_keys
+    pages = [Page(name="A"), Page(name="B")]
+    pages[0].keys[14] = KeyConfig(
+        label="Next", action=Action("next_page", {}))
+    pages[0].keys[15] = KeyConfig(
+        label="Next", action=Action("next_page", {}))
+    apply_page_nav_keys(pages)
+    assert pages[0].keys[15].action.type == "next_page"
+    assert pages[0].keys.get(14) is None or pages[0].keys[14].is_empty()
 
 
 def test_general_folder_has_stream_record_and_multi():
