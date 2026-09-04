@@ -18,9 +18,11 @@ from .. import rendering, assets
 from ..device import DEVICE_PROFILE
 from ..model import (DeckConfig, Profile, Page, KeyConfig, Action, Folder,
                      iter_config_secret_ids, _next_backup_path,
-                     _page_loss_summary)
-from ..actions import default_icon_for
+                     _page_loss_summary, _folder_loss_summary)
+from ..actions import default_icon_for, parse_catalog_drag
 from ..controller import DeckController
+from ..starter_layout import (apply_page_nav_everywhere, apply_page_nav_keys,
+                              build_soundboard_folder)
 from .widgets import (KeyButton, ActionEditor, ActionCatalog, KnobEditor,
                       ReorderDialog, _NoWheelWhenUnfocused, _protect_wheel)
 
@@ -66,6 +68,8 @@ class MainWindow(QMainWindow):
         # Stamp key-drags with the page they started on, so a drop landing
         # after a mid-drag page switch can be rejected.
         _widgets.CURRENT_PAGE_ID_PROVIDER = lambda: self._page().id
+        # Other pages in the current container for "Move to page" on folders.
+        _widgets.FOLDER_MOVE_PAGES_PROVIDER = self._folder_move_page_targets
 
         self.bridge = _Bridge()
         self.bridge.connected.connect(self._on_connected)
@@ -89,6 +93,11 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menu()
         self._build_tray()
+        # First/middle/last Prev–Next chips on every multi-page board (profiles
+        # and folders). Safe for existing configs: only empty or already-nav
+        # slots on keys 13/14 are touched.
+        apply_page_nav_everywhere(self.config)
+        self._queue_save()
         self._reload_profiles()
         self._rebuild_grid()
         self._last_page_key = self._current_page_key()
@@ -181,6 +190,12 @@ class MainWindow(QMainWindow):
         obs_act = QAction("OBS settings…", self)
         obs_act.triggered.connect(self._obs_settings)
         m.addAction(obs_act)
+        twitch_act = QAction("Twitch settings…", self)
+        twitch_act.triggered.connect(self._twitch_settings)
+        m.addAction(twitch_act)
+        sound_act = QAction("Soundboard audio…", self)
+        sound_act.triggered.connect(self._soundboard_audio_settings)
+        m.addAction(sound_act)
         m.addSeparator()
         m.addAction(quit_act)
 
@@ -302,6 +317,202 @@ class MainWindow(QMainWindow):
             dlg.accept()
 
         buttons.accepted.connect(_save)
+        dlg.exec()
+
+    def _twitch_settings(self):
+        """Edit Twitch Helix Client-ID / Client Secret for monitor keys."""
+        from .. import secret_store, twitch
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Twitch settings")
+        form = QFormLayout(dlg)
+        client_id = QLineEdit(self.config.twitch_client_id or "")
+        client_id.setPlaceholderText("from dev.twitch.tv/console")
+        sid = self.config.twitch_secret_id or ""
+        initial_secret = ""
+        unreadable = False
+        if sid:
+            initial_secret = secret_store.get(sid) or ""
+            unreadable = not initial_secret
+        if not initial_secret and not unreadable:
+            initial_secret = self.config.twitch_client_secret or ""
+        secret = QLineEdit(initial_secret)
+        secret.setEchoMode(QLineEdit.EchoMode.Password)
+        if unreadable:
+            secret.setPlaceholderText("(saved — keyring locked)")
+        test_login = QLineEdit()
+        test_login.setPlaceholderText("optional channel for Test (e.g. shroud)")
+        form.addRow("Client-ID", client_id)
+        form.addRow("Client Secret", secret)
+        form.addRow("Test channel", test_login)
+        hint = QLabel(
+            "Create an application at "
+            "<b>dev.twitch.tv/console</b> (OAuth Redirect URL can be "
+            "<code>http://localhost</code>). Monitor keys use metrics "
+            "<b>twitchviewers</b> / <b>twitchuptime</b> with the channel "
+            "login in Target. Helix needs both Client-ID and Client Secret "
+            "for an App Access Token.")
+        hint.setWordWrap(True)
+        form.addRow(hint)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel)
+        test_btn = buttons.addButton(
+            "Test connection", QDialogButtonBox.ButtonRole.ActionRole)
+        form.addRow(buttons)
+
+        def _test():
+            # Prefer the dialog field; if empty + unreadable keyring, use
+            # whatever secret_store still holds so Test matches Save.
+            sec = secret.text()
+            if not sec and sid and unreadable:
+                sec = secret_store.get(sid) or ""
+            ok, msg = twitch.ping(client_id.text(), sec, test_login.text())
+            if ok:
+                QMessageBox.information(dlg, "Twitch connection", msg)
+            else:
+                QMessageBox.warning(dlg, "Twitch connection", msg)
+
+        test_btn.clicked.connect(_test)
+        buttons.rejected.connect(dlg.reject)
+
+        def _save():
+            self.config.twitch_client_id = client_id.text().strip()
+            text = secret.text()
+            if not text:
+                if not (sid and unreadable):
+                    old_sid = self.config.twitch_secret_id
+                    self.config.twitch_secret_id = ""
+                    self.config.twitch_client_secret = ""
+                    if old_sid:
+                        self._owned_secret_ids.discard(old_sid)
+            else:
+                new_sid = sid or secret_store.new_id()
+                if secret_store.store(new_sid, text):
+                    self.config.twitch_secret_id = new_sid
+                    self.config.twitch_client_secret = ""
+                    self._owned_secret_ids.add(new_sid)
+                elif sid and unreadable is False and self.config.twitch_secret_id:
+                    QMessageBox.warning(
+                        dlg, "Secret not updated",
+                        "The keyring refused to store the new Client Secret, "
+                        "so the previous secret is still active.")
+                else:
+                    self.config.twitch_secret_id = ""
+                    self.config.twitch_client_secret = text
+                    QMessageBox.warning(
+                        dlg, "Secret not stored securely",
+                        "No usable keyring was found, so the Twitch Client "
+                        "Secret will be saved in your configuration file in "
+                        "cleartext.")
+            twitch.invalidate()
+            self._queue_save()
+            dlg.accept()
+
+        buttons.accepted.connect(_save)
+        dlg.exec()
+
+    def _soundboard_audio_settings(self):
+        """Choose which PipeWire/Pulse sink soundboard clips play to."""
+        from .. import sounds
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Soundboard audio")
+        form = QFormLayout(dlg)
+
+        sink_combo = QComboBox()
+        sink_combo.setMinimumWidth(360)
+        sink_combo.addItem("System default", "")
+        current = self.config.sound_sink or ""
+        for name, desc in sounds.list_sinks():
+            label = desc if desc == name else f"{desc}  ({name})"
+            sink_combo.addItem(label, name)
+        idx = sink_combo.findData(current)
+        if idx < 0 and current:
+            sink_combo.addItem(f"(saved) {current}", current)
+            idx = sink_combo.count() - 1
+        if idx >= 0:
+            sink_combo.setCurrentIndex(idx)
+
+        refresh = QPushButton("Refresh devices")
+        also = QCheckBox("Also play on default output (hear it on headphones)")
+        also.setChecked(bool(self.config.sound_also_default))
+        also.setEnabled(bool(sink_combo.currentData()))
+
+        def _on_sink_changed(_i=None):
+            also.setEnabled(bool(sink_combo.currentData()))
+
+        sink_combo.currentIndexChanged.connect(_on_sink_changed)
+
+        def _refresh():
+            sel = sink_combo.currentData()
+            sink_combo.blockSignals(True)
+            sink_combo.clear()
+            sink_combo.addItem("System default", "")
+            for name, desc in sounds.list_sinks():
+                label = desc if desc == name else f"{desc}  ({name})"
+                sink_combo.addItem(label, name)
+            i = sink_combo.findData(sel)
+            if i < 0 and sel:
+                sink_combo.addItem(f"(saved) {sel}", sel)
+                i = sink_combo.count() - 1
+            sink_combo.setCurrentIndex(max(0, i))
+            sink_combo.blockSignals(False)
+            _on_sink_changed()
+
+        refresh.clicked.connect(_refresh)
+
+        row = QHBoxLayout()
+        row.addWidget(sink_combo, 1)
+        row.addWidget(refresh)
+        wrap = QWidget()
+        wrap.setLayout(row)
+        form.addRow("Output device", wrap)
+        form.addRow("", also)
+        hint = QLabel(
+            "For stream capture, pick the sink OBS records (or a virtual sink "
+            "you add as an Audio Input Capture). With <b>Also play on default "
+            "output</b> on, clips still play on your headphones.<br><br>"
+            "Tip: create a null sink with "
+            "<code>pactl load-module module-null-sink "
+            "sink_name=Soundboard</code>, route it into OBS, and select "
+            "<b>Soundboard</b> here.")
+        hint.setWordWrap(True)
+        form.addRow(hint)
+
+        test_btn = QPushButton("Test (play Bruh)")
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel)
+        form.addRow(test_btn)
+        form.addRow(buttons)
+
+        def _test():
+            sink = sink_combo.currentData() or ""
+            ok = sounds.play(
+                "bruh", volume=70, sink=sink,
+                also_default=also.isChecked() if sink else False)
+            if ok:
+                QMessageBox.information(
+                    dlg, "Soundboard audio",
+                    "Played a test clip"
+                    + (f" to “{sink_combo.currentText()}”." if sink
+                       else " on the system default."))
+            else:
+                QMessageBox.warning(
+                    dlg, "Soundboard audio",
+                    "Could not play a test clip. Install pw-play or paplay.")
+
+        def _save():
+            self.config.sound_sink = sink_combo.currentData() or ""
+            self.config.sound_also_default = bool(also.isChecked())
+            self._queue_save()
+            dlg.accept()
+
+        test_btn.clicked.connect(_test)
+        buttons.accepted.connect(_save)
+        buttons.rejected.connect(dlg.reject)
         dlg.exec()
 
     def _set_autostart(self, on: bool):
@@ -515,11 +726,19 @@ class MainWindow(QMainWindow):
         self.config.obs_port = imported.obs_port
         self.config.obs_secret_id = imported.obs_secret_id
         self.config.obs_password = imported.obs_password
+        self.config.twitch_client_id = imported.twitch_client_id
+        self.config.twitch_secret_id = imported.twitch_secret_id
+        self.config.twitch_client_secret = imported.twitch_client_secret
         self.config.profiles = imported.profiles
         self.config.active_profile_id = imported.active_profile_id
         try:
             from .. import obs_ws
             obs_ws.invalidate()
+        except Exception:
+            pass
+        try:
+            from .. import twitch
+            twitch.invalidate()
         except Exception:
             pass
         # reset_nav, not page_index=0: if we were inside a folder, _container
@@ -787,6 +1006,8 @@ class MainWindow(QMainWindow):
             btn.keyMoved.connect(self._on_key_moved)
             btn.openFolder.connect(self._on_open_folder)
             btn.createFolder.connect(self._on_create_folder_at)
+            btn.moveFolderToPage.connect(self._on_move_folder_to_page)
+            btn.deleteKey.connect(self._on_delete_key)
             self.grid.addWidget(btn, r, c)
             self.buttons[idx] = btn
         self._refresh_all_previews()
@@ -894,11 +1115,18 @@ class MainWindow(QMainWindow):
             self.controller.render_page()
             self._queue_save()
 
+    def _sync_container_page_nav(self) -> None:
+        """Refresh Prev/Next chips for the current profile or folder pages."""
+        apply_page_nav_keys(
+            self._container().pages,
+            in_folder=not self.controller.at_root())
+
     def _add_page(self):
         cont = self._container()
         cont.pages.append(Page(name="Page"))
         # jump to and show the new page
         self.controller.page_index = len(cont.pages) - 1
+        self._sync_container_page_nav()
         self._reload_pages()
         self._refresh_all_previews()
         self.controller.render_page()
@@ -981,6 +1209,7 @@ class MainWindow(QMainWindow):
         # Page's objects and silently vanish on restart (0.8.1 audit).
         self._deselect()
         self._last_page_key = None       # force the next resync to treat this as a change
+        self._sync_container_page_nav()
         self._reload_knobs()
         self._reload_pages()
         self._refresh_all_previews()
@@ -1024,6 +1253,7 @@ class MainWindow(QMainWindow):
             if on_cont:
                 self.controller.page_index = next(
                     (i for i, p in enumerate(cont.pages) if p.id == current_id), 0)
+        apply_page_nav_keys(cont.pages, in_folder=not self.controller.at_root())
         self._reload_pages()
         self._refresh_all_previews()
         self.controller.render_page()
@@ -1071,12 +1301,25 @@ class MainWindow(QMainWindow):
         self.editor.set_key(kc, index)
 
     def _on_key_moved(self, src: int, dst: int):
-        """Swap two keys' configs (drag one key onto another to rearrange)."""
+        """Rearrange keys: swap slots, or move into a folder when dropped on one.
+
+        Stream Deck–style: dragging a non-empty key onto an Open-folder key
+        places it in the first empty slot inside that folder and clears the
+        source slot. Dropping onto a normal key still swaps the two.
+        """
         if src == dst:
             return
         page = self._page()
         a = page.keys.get(src, KeyConfig())
         b = page.keys.get(dst, KeyConfig())
+
+        if (not a.is_empty()
+                and b.action.type == "open_folder"
+                and b.folder is not None):
+            # Move refused (full / cycle) leaves keys unchanged.
+            self._move_key_into_folder(page, src, dst, a, b)
+            return
+
         page.keys[src] = b
         page.keys[dst] = a
         for i in (src, dst):
@@ -1091,7 +1334,75 @@ class MainWindow(QMainWindow):
         self._on_key_selected(dst)   # follow the key to its new slot
         self._queue_save()
 
+    @staticmethod
+    def _folder_contains(outer: Folder, inner: Folder) -> bool:
+        """True if inner is outer, or nested somewhere under outer."""
+        if outer is inner:
+            return True
+        for pg in outer.pages:
+            for kc in pg.keys.values():
+                if kc.folder is not None and MainWindow._folder_contains(
+                        kc.folder, inner):
+                    return True
+        return False
+
+    def _move_key_into_folder(self, src_page: Page, src_index: int,
+                              folder_index: int, src_kc: KeyConfig,
+                              folder_kc: KeyConfig) -> bool:
+        """Place src_kc in folder_kc.folder; clear src_index. True if moved."""
+        folder = folder_kc.folder
+        if folder is None:
+            return False
+        # Refuse nesting a folder into itself or into one of its descendants.
+        if (src_kc.folder is not None
+                and self._folder_contains(src_kc.folder, folder)):
+            QMessageBox.information(
+                self, "Move into folder",
+                "That would put a folder inside itself.")
+            return False
+        count = int(DEVICE_PROFILE.get("key_count", 15) or 15)
+        dest_page = None
+        slot = None
+        for pg in folder.pages:
+            for i in range(1, count + 1):
+                existing = pg.keys.get(i)
+                if existing is None or existing.is_empty():
+                    dest_page, slot = pg, i
+                    break
+            if slot is not None:
+                break
+        if dest_page is None or slot is None:
+            name = folder_kc.label or folder.name or "Folder"
+            QMessageBox.warning(
+                self, "Move into folder",
+                f"“{name}” has no empty key slot.")
+            return False
+        dest_page.keys[slot] = src_kc
+        src_page.keys[src_index] = KeyConfig()
+        self.buttons[src_index].update_preview(KeyConfig())
+        self.buttons[folder_index].update_preview(folder_kc)
+        if self.controller.connected:
+            self.controller.render_key(src_index)
+            self.controller.render_key(folder_index)
+            try:
+                self.controller.refresh()
+            except Exception:
+                pass
+        self._on_key_selected(folder_index)
+        self._queue_save()
+        return True
+
     def _on_action_dropped(self, index: int, atype: str):
+        # Catalog presets arrive as "monitor?metric=gpu"; plain drops stay
+        # bare action-type strings. parse_catalog_drag is a no-op on the latter.
+        atype, preset = parse_catalog_drag(atype)
+
+        # Soundboard “All sounds folder” chip — full Memes-style board of every
+        # bundled clip, with Prev/Next/Back already laid out.
+        if atype == "open_folder" and preset.get("preset") == "soundboard":
+            self._drop_soundboard_folder(index)
+            return
+
         # Open-folder is not a bare action: it owns nested pages. Route through
         # Create folder… so the user names it (or renames/restores) instead of
         # silently minting a generic "Folder" with no prompt.
@@ -1108,7 +1419,7 @@ class MainWindow(QMainWindow):
         # the first action's identity forever.)
         old_icon_name, old_label = default_icon_for(kc.action)
         old_auto_icon = assets.library_ref(old_icon_name)
-        kc.action = Action(atype, {})
+        kc.action = Action(atype, dict(preset))
         if atype == "switch_profile" and self.config.profiles:
             # Materialize the target the editor will display: leaving it
             # empty made the dropped key a silent no-op until some unrelated
@@ -1350,10 +1661,104 @@ class MainWindow(QMainWindow):
             self.controller.refresh()
         self._queue_save()
 
+    def _drop_soundboard_folder(self, index: int) -> None:
+        """Place a multi-page folder of every bundled meme clip on ``index``."""
+        page = self._page()
+        kc = page.key(index)
+        if not kc.is_empty():
+            label = f" (“{kc.label}”)" if kc.label else ""
+            if kc.folder is not None:
+                loss = _folder_loss_summary(kc.folder)
+                prompt = (
+                    f"Key {index}{label} already holds a folder"
+                    + (f" containing {loss}" if loss else "")
+                    + ".\n\nReplace it with the All sounds folder?")
+            else:
+                prompt = (
+                    f"Key {index} already has an action{label}.\n\n"
+                    f"Replace it with the All sounds folder?")
+            if QMessageBox.question(self, "All sounds folder", prompt) \
+                    != QMessageBox.StandardButton.Yes:
+                return
+        built = build_soundboard_folder(name="Memes")
+        # Copy fields onto the existing KeyConfig object (page.keys[index]).
+        kc.label = built.label
+        kc.icon = built.icon
+        kc.bg_color = built.bg_color
+        kc.text_color = built.text_color
+        kc.action = built.action
+        kc.hold_action = Action()
+        kc.folder = built.folder
+        self._refresh_key_slot(index)
+        sb = self.statusBar()
+        if sb is not None:
+            n_clips = sum(
+                1 for pg in (kc.folder.pages if kc.folder else [])
+                for k in pg.keys.values()
+                if k.action.type == "play_sound")
+            sb.showMessage(
+                f"Memes folder on key {index} — {n_clips} sounds; "
+                f"double-click to open",
+                5000)
+
     def _on_create_folder_at(self, index: int):
         """Context-menu Create folder… on a specific key slot."""
         self._on_key_selected(index)
         self._create_folder_on_selected()
+
+    def _on_delete_key(self, index: int):
+        """Context-menu Delete on a key chip — same wipe as Clear key."""
+        self._on_key_selected(index)
+        self.editor._clear_key()
+
+    def _folder_move_page_targets(self) -> list[tuple[int, str]]:
+        """Pages (other than the current one) a folder key can move to."""
+        cont = self._container()
+        cur = self.controller.page_index
+        out: list[tuple[int, str]] = []
+        for n, pg in enumerate(cont.pages):
+            if n == cur:
+                continue
+            label = f"Page {n + 1}"
+            if pg.name and not pg.name.lower().startswith(("page", "main")):
+                label = f"{n + 1}: {pg.name}"
+            out.append((n, label))
+        return out
+
+    def _on_move_folder_to_page(self, key_index: int, dest_page_index: int):
+        """Move a folder key to the first empty slot on another page."""
+        src_page = self._page()
+        kc = src_page.keys.get(key_index)
+        if (kc is None or kc.action.type != "open_folder"
+                or kc.folder is None):
+            return
+        cont = self._container()
+        if dest_page_index < 0 or dest_page_index >= len(cont.pages):
+            return
+        if dest_page_index == self.controller.page_index:
+            return
+        dest_page = cont.pages[dest_page_index]
+        count = DEVICE_PROFILE["key_count"]
+        slot = None
+        for i in range(1, count + 1):
+            existing = dest_page.keys.get(i)
+            if existing is None or existing.is_empty():
+                slot = i
+                break
+        if slot is None:
+            QMessageBox.warning(
+                self, "Move folder",
+                "The target page has no empty key slot.")
+            return
+        dest_page.keys[slot] = kc
+        src_page.keys[key_index] = KeyConfig()
+        # Follow the folder to its new page so the user sees where it went.
+        self.controller.page_index = dest_page_index
+        self._reload_pages()
+        self._refresh_all_previews()
+        self.controller.render_page()
+        self._on_key_selected(slot)
+        self._queue_save()
 
     def _on_brightness(self, v):
         self.controller.set_brightness(v)
