@@ -1,6 +1,6 @@
 # fifine Control Deck for Linux — USB permissions
 # Gives the user at the active seat read/write access to the fifine / Hotspot
-# Stream Dock control device without root, and also grants the "plugdev" group.
+# Stream Dock control device without root.
 #
 # WHY 70- AND NOT 99-: udev applies rule files in lexical order, and systemd's
 # /usr/lib/udev/rules.d/73-seat-late.rules is what acts on the uaccess tag:
@@ -10,15 +10,23 @@
 # before 73 — the distro's own uaccess rules live at 70-uaccess.rules.
 # Do not renumber this above 72 without re-reading the note above.
 #
-# uaccess is what makes this work on a stock install: "plugdev" is a
-# Debian/Ubuntu-ism that users are not always in, and that some distros
-# (Fedora, Arch) do not have at all. GROUP is kept as a fallback.
+# uaccess is the primary grant (ACL for the active seat). Do NOT put
+# GROUP="plugdev" on the same line as TAG+="uaccess": on distros without a
+# plugdev group (Arch, CachyOS, Fedora, …) udev fails to resolve the group and
+# ignores the rest of that rule line, which drops the uaccess tag and leaves
+# /dev/hidraw* as root:root 0600. Steam's own hidraw rules use the same
+# MODE + TAG pattern without a GROUP for that reason.
 #
 # Install:
 #   sudo cp 70-fifine-deck.rules /etc/udev/rules.d/
 #   sudo udevadm control --reload-rules && sudo udevadm trigger
-# Then unplug/replug the device.
+# Then unplug/replug the device (or rely on the trigger above).
 
 # fifine Control Deck (HOTSPOTEKUSB) — VID 0x3142
-SUBSYSTEM=="usb", ATTR{idVendor}=="3142", MODE="0660", GROUP="plugdev", TAG+="uaccess"
-KERNEL=="hidraw*", ATTRS{idVendor}=="3142", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="3142", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3142", MODE="0660", TAG+="uaccess"
+
+# Optional Debian/Ubuntu fallback on its own lines so a missing plugdev group
+# cannot cancel the uaccess tag above.
+SUBSYSTEM=="usb", ATTR{idVendor}=="3142", GROUP="plugdev"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3142", GROUP="plugdev"
