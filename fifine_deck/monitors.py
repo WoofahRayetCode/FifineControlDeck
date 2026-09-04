@@ -1,12 +1,14 @@
 """
 System-monitor keys: live CPU / RAM / VRAM / GPU / temperature / network /
-disk readouts — plus a clock face — rendered onto a key's LCD (like the
-monitor widgets in the official Stream Dock app).
+disk / process-RAM / CPU+GPU power / Twitch viewers+uptime readouts — plus
+a clock face — rendered onto a key's LCD (like the monitor widgets in the
+official Stream Dock app).
 
 Two halves:
-- Sampler   — polls the metrics (psutil for CPU/RAM/disk/network/temps,
-              per-vendor sources for VRAM and GPU load) and keeps the short
-              history a sparkline needs.
+- Sampler   — polls the metrics (psutil for CPU/RAM/disk/network/temps/
+              process RSS, RAPL for CPU power, per-vendor sources for VRAM /
+              GPU load / GPU power, Twitch Helix for live viewers/uptime)
+              and keeps the short history a sparkline needs.
 - render_monitor — draws a Reading as a key image in one of three styles
               (number / gauge / graph), reusing the app font + colour helpers.
 
@@ -42,10 +44,20 @@ METRICS = {
     "vram": "VRAM",
     "gpu": "GPU",
     "gputemp": "GPU°C",
+    "cputemp": "CPU°C",
+    "igpu": "iGPU",
+    "igpuvram": "iVRAM",
+    "igpupower": "iGPU W",
+    "igputemp": "iGPU°C",
     "temp": "TEMP",
     "net": "NET",
     "disk": "DISK",
     "clock": "CLOCK",
+    "procram": "APP",
+    "cpupower": "CPU W",
+    "gpupower": "GPU W",
+    "twitchviewers": "LIVE",
+    "twitchuptime": "UPTIME",
 }
 STYLES = ("number", "gauge", "graph")
 # Clock faces: "auto" keeps the 0.7.0 behavior (seconds iff refreshing under
@@ -58,10 +70,17 @@ _CLOCK_DATE_STRF = {"auto": "%a %d %b", "iso": "%Y-%m-%d",
                     "us": "%a, %b %d", "none": None}
 # Metrics on a fixed 0..100 axis (gauge + graph scale). temp/gputemp are °C,
 # not percentages, but share the axis: 0-100°C covers consumer hardware and
-# the 90 warn threshold doubles as a sensible thermal alarm.
-PERCENT_METRICS = frozenset({"cpu", "ram", "vram", "gpu", "disk", "temp", "gputemp"})
-# the only metrics a target applies to (disk mount, net iface, temp sensor)
-TARGETED_METRICS = frozenset({"disk", "net", "temp"})
+# the 90 warn threshold doubles as a sensible thermal alarm. Power metrics
+# are watts (auto-scaled graphs); procram is % of system RAM.
+PERCENT_METRICS = frozenset({
+    "cpu", "ram", "vram", "gpu", "igpu", "igpuvram", "disk", "temp",
+    "gputemp", "cputemp", "igputemp", "procram",
+})
+# the only metrics a target applies to (disk mount, net iface, temp sensor,
+# process name for procram, or Twitch channel login)
+TARGETED_METRICS = frozenset({
+    "disk", "net", "temp", "procram", "twitchviewers", "twitchuptime",
+})
 
 HISTORY_LEN = 32             # sparkline points kept per metric
 # Sampled streams kept before the least recently used half is dropped. A deck
@@ -219,12 +238,24 @@ class Sampler:
         self._hist: dict[tuple, deque] = {}
         self._last: dict[tuple, Reading] = {}
         self._net_prev: dict[str, tuple[float, int, int]] = {}
+        # RAPL energy_uj snapshots: path -> (monotonic_ts, energy_uj)
+        self._rapl_prev: dict[str, tuple[float, int]] = {}
         self._vram_backend = None      # probed lazily; ("none",) when absent
         self._gpu_backend = None       # same lifecycle as _vram_backend
         self._gputemp_backend = None   # same lifecycle as _vram_backend
+        self._gpupower_backend = None  # same lifecycle as _vram_backend
+        self._igpu_backend = None      # integrated GPU (non-NVIDIA DRM card)
+        self._igpuvram_backend = None
+        self._igpupower_backend = None
+        self._igputemp_backend = None
         self._vram_retries = 0         # bounded: a dead source must settle
         self._gpu_retries = 0
         self._gputemp_retries = 0
+        self._gpupower_retries = 0
+        self._igpu_retries = 0
+        self._igpuvram_retries = 0
+        self._igpupower_retries = 0
+        self._igputemp_retries = 0
         # Backends that PROBE fine but cannot be read; see _gpu_read_failed.
         self._read_failures: dict[str, int] = {}
         # psutil keys its cpu_percent since-last-call baseline PER THREAD, so
@@ -535,6 +566,57 @@ class Sampler:
         pct = max(0.0, min(100.0, val))
         return Reading(pct, f"{val:.0f}°C", label, sample=val)
 
+    def _sample_cputemp(self, spec: MonitorSpec) -> Reading:
+        """CPU package temperature (same auto pick as temp with no target)."""
+        if psutil is None:
+            return _NO_PSUTIL
+        temps: dict = getattr(psutil, "sensors_temperatures", lambda: {})() or {}
+        # Prefer a CPU chip explicitly — do not fall through to nvme/wifi.
+        picked = None
+        for chip in _TEMP_PREFERRED:
+            for name, entries in temps.items():
+                if name.lower() == chip and entries:
+                    e = _pkg_entry(entries)
+                    picked = (getattr(e, "label", "") or name, float(e.current))
+                    break
+            if picked is not None:
+                break
+        if picked is None:
+            return Reading(None, "n/a", "no CPU sensor", ok=False)
+        label, val = picked
+        pct = max(0.0, min(100.0, val))
+        return Reading(pct, f"{val:.0f}°C", label, sample=val)
+
+    def _sample_igputemp(self, spec: MonitorSpec) -> Reading:
+        """Integrated GPU temperature (AMD hwmon on the non-NVIDIA card)."""
+        b = self._resolve_gpu_backend("_igputemp_backend", _probe_igputemp,
+                                      "_igputemp_retries")
+        if b[0] == "amdgpu":
+            try:
+                with open(b[1]) as f:
+                    # hwmon temp*_input is millidegrees Celsius.
+                    val = int(f.read().strip()) / 1000.0
+                label = b[2] if len(b) > 2 else "iGPU"
+            except Exception:
+                self._gpu_read_failed("_igputemp_backend", "_igputemp_retries")
+                raise
+            self._gpu_read_ok("_igputemp_backend")
+        elif b[0] == "psutil":
+            if psutil is None:
+                return _NO_PSUTIL
+            temps: dict = getattr(psutil, "sensors_temperatures",
+                                  lambda: {})() or {}
+            picked = _pick_temp(temps, b[1])
+            if picked is None:
+                self._gpu_read_failed("_igputemp_backend", "_igputemp_retries")
+                return Reading(None, "n/a", "no iGPU sensor", ok=False)
+            self._gpu_read_ok("_igputemp_backend")
+            label, val = picked
+        else:
+            return Reading(None, "n/a", "no iGPU sensor", ok=False)
+        pct = max(0.0, min(100.0, val))
+        return Reading(pct, f"{val:.0f}°C", label, sample=val)
+
     def _sample_clock(self, spec: MonitorSpec) -> Reading:
         # No psutil needed. "auto" shows seconds only at fast refresh — at
         # slow intervals a seconds display would just sit stale between pushes.
@@ -551,8 +633,221 @@ class Sampler:
         sub = time.strftime(datef, now) if datef else ""
         return Reading(None, text, sub)
 
+    def _sample_procram(self, spec: MonitorSpec) -> Reading:
+        """RSS of processes matching the configured name (target).
+
+        Match is case-insensitive against psutil name() and the executable
+        basename. Multiple matches are summed (launcher + game helpers).
+        """
+        if psutil is None:
+            return _NO_PSUTIL
+        want = (spec.target or "").strip().lower()
+        if not want:
+            return Reading(None, "n/a", "set process name", ok=False)
+        total_rss = 0
+        matched = 0
+        label = want
+        for proc in psutil.process_iter(["name", "memory_info"]):
+            try:
+                name = (proc.info.get("name") or "").lower()
+                if name != want and not name.startswith(want):
+                    # Also accept an exact exe basename when name differs
+                    # (e.g. target "cyberpunk2077" vs Wine wrapper names).
+                    try:
+                        exe = os.path.basename(proc.exe() or "").lower()
+                    except (psutil.Error, OSError):
+                        exe = ""
+                    if exe != want and not exe.startswith(want):
+                        continue
+                mi = proc.info.get("memory_info")
+                if mi is None:
+                    continue
+                total_rss += int(mi.rss)
+                matched += 1
+                if matched == 1:
+                    label = proc.info.get("name") or want
+            except (psutil.Error, OSError, TypeError, ValueError):
+                continue
+        if matched == 0:
+            return Reading(None, "n/a", f"no {want}", ok=False)
+        vm = psutil.virtual_memory()
+        pct = 100.0 * total_rss / vm.total if vm.total else 0.0
+        sub = label if matched == 1 else f"{label} ×{matched}"
+        return Reading(pct, f"{pct:.0f}%",
+                       f"{_fmt_bytes(total_rss)} · {sub}", sample=pct)
+
+    def _sample_cpupower(self, spec: MonitorSpec) -> Reading:
+        """CPU package power via Intel/AMD RAPL energy_uj counters."""
+        path = _find_rapl_package()
+        if path is None:
+            return Reading(None, "n/a", "no RAPL", ok=False)
+        try:
+            with open(path) as f:
+                energy = int(f.read().strip())
+        except (OSError, ValueError):
+            return Reading(None, "n/a", "RAPL unread", ok=False)
+        now = time.monotonic()
+        prev = self._rapl_prev.get(path)
+        self._rapl_prev[path] = (now, energy)
+        if prev is None:
+            return Reading(None, "…", METRICS["cpupower"])
+        dt = now - prev[0]
+        if dt <= 0:
+            return Reading(None, "…", METRICS["cpupower"])
+        # energy_uj is cumulative µJ; wrap-around (32-bit counters on some
+        # platforms) yields a negative delta — treat as warm-up.
+        de = energy - prev[1]
+        if de < 0:
+            return Reading(None, "…", METRICS["cpupower"])
+        watts = (de / 1_000_000.0) / dt
+        # Soft 0..100 gauge axis (~100 W covers most laptop packages).
+        pct = max(0.0, min(100.0, watts))
+        return Reading(pct, _fmt_watts(watts), "package", sample=watts)
+
+    def _sample_gpupower(self, spec: MonitorSpec) -> Reading:
+        """GPU board power: NVML milliwatts or AMD hwmon power1_* microwatts."""
+        b = self._resolve_gpu_backend("_gpupower_backend", _probe_gpupower,
+                                      "_gpupower_retries")
+        if b[0] not in ("nvml", "amdgpu"):
+            return Reading(None, "n/a", "no GPU power", ok=False)
+        try:
+            if b[0] == "nvml":
+                # nvmlDeviceGetPowerUsage returns milliwatts.
+                watts = float(b[1].nvmlDeviceGetPowerUsage(b[2])) / 1000.0
+                label = "GPU"
+            else:
+                with open(b[1]) as f:
+                    raw = int(f.read().strip())
+                # AMD hwmon power1_average / power1_input are microwatts.
+                watts = raw / 1_000_000.0
+                label = b[2] if len(b) > 2 else "GPU"
+        except Exception:
+            self._gpu_read_failed("_gpupower_backend", "_gpupower_retries")
+            raise
+        self._gpu_read_ok("_gpupower_backend")
+        pct = max(0.0, min(100.0, watts))
+        return Reading(pct, _fmt_watts(watts), label, sample=watts)
+
+    def _sample_igpu(self, spec: MonitorSpec) -> Reading:
+        """Integrated GPU load (AMD gpu_busy_percent on the non-NVIDIA card)."""
+        b = self._resolve_gpu_backend("_igpu_backend", _probe_igpu,
+                                      "_igpu_retries")
+        if b[0] != "amdgpu":
+            return Reading(None, "n/a", "no iGPU", ok=False)
+        try:
+            with open(b[1]) as f:
+                pct = float(f.read())
+        except Exception:
+            self._gpu_read_failed("_igpu_backend", "_igpu_retries")
+            raise
+        self._gpu_read_ok("_igpu_backend")
+        return Reading(pct, f"{pct:.0f}%", "load", sample=pct)
+
+    def _sample_igpuvram(self, spec: MonitorSpec) -> Reading:
+        """Integrated GPU VRAM (AMD mem_info_vram_* on the non-NVIDIA card)."""
+        b = self._resolve_gpu_backend("_igpuvram_backend", _probe_igpuvram,
+                                      "_igpuvram_retries")
+        if b[0] != "amdgpu":
+            return Reading(None, "n/a", "no iGPU VRAM", ok=False)
+        try:
+            with open(b[1]) as f:
+                used = int(f.read())
+            with open(b[2]) as f:
+                total = int(f.read())
+        except Exception:
+            self._gpu_read_failed("_igpuvram_backend", "_igpuvram_retries")
+            raise
+        self._gpu_read_ok("_igpuvram_backend")
+        pct = 100.0 * used / total if total else 0.0
+        return Reading(pct, f"{pct:.0f}%",
+                       f"{_fmt_bytes(used)} / {_fmt_bytes(total)}", sample=pct)
+
+    def _sample_igpupower(self, spec: MonitorSpec) -> Reading:
+        """Integrated GPU board power (AMD hwmon on the non-NVIDIA card)."""
+        b = self._resolve_gpu_backend("_igpupower_backend", _probe_igpupower,
+                                      "_igpupower_retries")
+        if b[0] != "amdgpu":
+            return Reading(None, "n/a", "no iGPU power", ok=False)
+        try:
+            with open(b[1]) as f:
+                raw = int(f.read().strip())
+            watts = raw / 1_000_000.0
+            label = b[2] if len(b) > 2 else "iGPU"
+        except Exception:
+            self._gpu_read_failed("_igpupower_backend", "_igpupower_retries")
+            raise
+        self._gpu_read_ok("_igpupower_backend")
+        pct = max(0.0, min(100.0, watts))
+        return Reading(pct, _fmt_watts(watts), label, sample=watts)
+
+    def _sample_twitchviewers(self, spec: MonitorSpec) -> Reading:
+        """Twitch live viewer count for the channel login in Target."""
+        from . import twitch
+        login = (spec.target or "").strip()
+        if not login:
+            return Reading(None, "n/a", "set channel", ok=False)
+        info = twitch.get_stream(login)
+        if info is None:
+            return Reading(None, "n/a", "Twitch creds?", ok=False)
+        if not info.live:
+            return Reading(0.0, "offline", info.login or login, sample=0.0)
+        # Soft gauge axis: 0..100 viewers maps 1:1; larger streams still
+        # graph via sample=viewer_count (auto-scaled, not in PERCENT_METRICS).
+        pct = max(0.0, min(100.0, float(info.viewer_count)))
+        sub = info.game_name or info.login or login
+        return Reading(pct, twitch.fmt_viewers(info.viewer_count), sub,
+                       sample=float(info.viewer_count))
+
+    def _sample_twitchuptime(self, spec: MonitorSpec) -> Reading:
+        """How long the Twitch channel in Target has been live."""
+        from . import twitch
+        login = (spec.target or "").strip()
+        if not login:
+            return Reading(None, "n/a", "set channel", ok=False)
+        info = twitch.get_stream(login)
+        if info is None:
+            return Reading(None, "n/a", "Twitch creds?", ok=False)
+        if not info.live:
+            return Reading(None, "offline", info.login or login, sample=None)
+        secs = info.uptime_seconds
+        if secs is None:
+            return Reading(None, "n/a", "no start time", ok=False)
+        # Soft 0..100 gauge ≈ first ~100 minutes of a stream.
+        minutes = secs / 60.0
+        pct = max(0.0, min(100.0, minutes))
+        return Reading(pct, twitch.fmt_uptime(secs), info.login or login,
+                       sample=secs)
+
 
 _NO_PSUTIL = Reading(None, "n/a", "psutil missing", ok=False)
+
+
+def _fmt_watts(w: float) -> str:
+    if w < 10:
+        return f"{w:.1f} W"
+    return f"{w:.0f} W"
+
+
+def _find_rapl_package() -> str | None:
+    """Path to the package-level RAPL energy_uj counter, if any."""
+    best = None
+    for name_path in sorted(glob.glob("/sys/class/powercap/*/name")):
+        try:
+            with open(name_path) as f:
+                name = f.read().strip().lower()
+        except OSError:
+            continue
+        energy = os.path.join(os.path.dirname(name_path), "energy_uj")
+        if not os.path.exists(energy):
+            continue
+        # Prefer the package domain; fall back to any RAPL zone.
+        if name.startswith("package"):
+            return energy
+        if best is None and not name.startswith(("core", "uncore", "dram")):
+            best = energy
+        elif best is None:
+            best = energy
+    return best
 
 # Chips whose first matching entry is the CPU-package temperature, in
 # preference order (Intel, AMD, AMD-alt, ARM SBCs, ACPI fallback).
@@ -736,6 +1031,165 @@ def _probe_gputemp(final: bool = False):
             if _pick_temp(temps, want) is not None:
                 return ("amdgpu", want)
     return ("retry",) if (nvml_importable and not final) else ("none",)
+
+
+def _probe_gpupower(final: bool = False):
+    """Find a GPU power source: NVIDIA via NVML, AMD via hwmon power1_*.
+
+    Same hybrid-machine retry/final rules as the other GPU probes: never pin
+    an AMD iGPU reading while an NVIDIA dGPU is still coming up."""
+    nvml_present = False
+    nvml_inited = False
+    try:
+        import pynvml
+        nvml_present = True
+        pynvml.nvmlInit()
+        nvml_inited = True
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        pynvml.nvmlDeviceGetPowerUsage(handle)     # probe the sensor too
+        return ("nvml", pynvml, handle)
+    except Exception:
+        if nvml_inited:
+            try:
+                pynvml.nvmlShutdown()
+            except Exception:
+                pass
+            # NVML up but power query failed: retry, do not fall to amdgpu.
+            if _nvidia_gpu_present() and not final:
+                return ("retry",)
+    if nvml_present and not final and _nvidia_gpu_present():
+        return ("retry",)
+    # Prefer power1_average (time-averaged) over instantaneous power1_input.
+    for kind, label in (("power1_average", "avg"), ("power1_input", "input")):
+        for path in sorted(glob.glob(
+                f"/sys/class/drm/card*/device/hwmon/hwmon*/{kind}")):
+            try:
+                with open(path) as f:
+                    int(f.read().strip())
+            except (OSError, ValueError):
+                continue
+            return ("amdgpu", path, label)
+    return ("retry",) if (nvml_present and not final) else ("none",)
+
+
+_PCI_VENDOR_NVIDIA = "0x10de"
+_PCI_VENDOR_AMD = "0x1002"
+_PCI_VENDOR_INTEL = "0x8086"
+
+
+def _drm_card_dirs() -> list[str]:
+    """Top-level DRM card directories (card0, card1, …), not connectors."""
+    out = []
+    for path in sorted(glob.glob("/sys/class/drm/card[0-9]*")):
+        base = os.path.basename(path)
+        if "-" in base:          # card1-DP-1 etc.
+            continue
+        if os.path.isdir(os.path.join(path, "device")):
+            out.append(path)
+    return out
+
+
+def _card_pci_vendor(card_dir: str) -> str:
+    try:
+        with open(os.path.join(card_dir, "device", "vendor")) as f:
+            return f.read().strip().lower()
+    except OSError:
+        return ""
+
+
+def _igpu_card_dirs() -> list[str]:
+    """DRM cards that are the integrated GPU on hybrid (and APU-only) machines.
+
+    NVIDIA discrete GPUs never expose amdgpu-style busy/VRAM/hwmon nodes here;
+    skipping vendor 0x10de is what keeps iGPU keys off the dGPU on hybrid
+    laptops. Prefer AMD/Intel vendors when present.
+    """
+    cards = _drm_card_dirs()
+    non_nv = [c for c in cards if _card_pci_vendor(c) != _PCI_VENDOR_NVIDIA]
+    preferred = [c for c in non_nv
+                 if _card_pci_vendor(c) in (_PCI_VENDOR_AMD, _PCI_VENDOR_INTEL)]
+    return preferred or non_nv
+
+
+def _probe_igpu(final: bool = False):
+    """Integrated GPU load via AMD gpu_busy_percent on a non-NVIDIA card.
+
+    Intel iGPUs do not expose this sysfs file; those machines report none.
+    final is accepted for API parity with the other GPU probes (no retry
+    loop — sysfs either exists or it does not)."""
+    del final  # unused; kept for _resolve_gpu_backend call signature
+    for card in _igpu_card_dirs():
+        busy = os.path.join(card, "device", "gpu_busy_percent")
+        if os.path.exists(busy):
+            return ("amdgpu", busy)
+    return ("none",)
+
+
+def _probe_igpuvram(final: bool = False):
+    """Integrated GPU VRAM via AMD mem_info_vram_* on a non-NVIDIA card.
+
+    Intel iGPUs share system RAM — there is no dedicated VRAM counter."""
+    del final
+    for card in _igpu_card_dirs():
+        total = os.path.join(card, "device", "mem_info_vram_total")
+        used = os.path.join(card, "device", "mem_info_vram_used")
+        if os.path.exists(total) and os.path.exists(used):
+            return ("amdgpu", used, total)
+    return ("none",)
+
+
+def _probe_igpupower(final: bool = False):
+    """Integrated GPU power via AMD hwmon under a non-NVIDIA DRM card."""
+    del final
+    for card in _igpu_card_dirs():
+        for kind, label in (("power1_average", "avg"), ("power1_input", "input")):
+            for path in sorted(glob.glob(
+                    os.path.join(card, "device", "hwmon", "hwmon*", kind))):
+                try:
+                    with open(path) as f:
+                        int(f.read().strip())
+                except (OSError, ValueError):
+                    continue
+                return ("amdgpu", path, label)
+    return ("none",)
+
+
+def _probe_igputemp(final: bool = False):
+    """Integrated GPU temperature via AMD hwmon under a non-NVIDIA DRM card.
+
+    Prefers a sensor labelled edge (die edge). Falls back to psutil's amdgpu
+    chip when sysfs is missing. Intel iGPUs typically have no discrete GPU
+    temp node here and report none.
+    """
+    del final
+    for card in _igpu_card_dirs():
+        paths = sorted(glob.glob(
+            os.path.join(card, "device", "hwmon", "hwmon*", "temp*_input")))
+        # Prefer edge, then first readable sensor.
+        ranked: list[tuple[str, str]] = []
+        for path in paths:
+            label_path = path.replace("_input", "_label")
+            label = "iGPU"
+            try:
+                with open(label_path) as f:
+                    label = f.read().strip() or label
+            except OSError:
+                pass
+            ranked.append((path, label))
+        ranked.sort(key=lambda pl: (0 if pl[1].lower() == "edge" else 1, pl[0]))
+        for path, label in ranked:
+            try:
+                with open(path) as f:
+                    int(f.read().strip())
+            except (OSError, ValueError):
+                continue
+            return ("amdgpu", path, label)
+    if psutil is not None:
+        temps: dict = getattr(psutil, "sensors_temperatures", lambda: {})() or {}
+        for want in ("amdgpu:edge", "amdgpu"):
+            if _pick_temp(temps, want) is not None:
+                return ("psutil", want)
+    return ("none",)
 
 
 # ---------------------------------------------------------------------------
