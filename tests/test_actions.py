@@ -33,11 +33,60 @@ def test_system_catalog_has_monitor_metric_presets():
     }
 
 
+def test_power_catalog_has_kde_profile_chips():
+    catalog = dict(actions.get_action_catalog())
+    assert "Power" in catalog
+    power = catalog["Power"]
+    labels = [actions.catalog_entry_label(e) for e in power]
+    for want in ("Performance", "Balanced", "Power Saver",
+                 "Cycle power profile", "Power profile"):
+        assert want in labels
+    perf = next(e for e in power
+                if actions.catalog_entry_label(e) == "Performance")
+    assert actions.catalog_entry_type(perf) == "power_profile"
+    assert actions.catalog_entry_params(perf) == {"profile": "performance"}
+    icon, label = actions.default_icon_for(
+        Action("power_profile", {"profile": "performance"}))
+    assert label == "Perf" and icon == "brightness_up"
+    icon, label = actions.default_icon_for(
+        Action("power_profile", {"profile": "power-saver"}))
+    assert label == "Saver" and icon == "brightness_down"
+
+
+def test_power_catalog_has_system_power_chips():
+    power = dict(actions.get_action_catalog())["Power"]
+    labels = [actions.catalog_entry_label(e) for e in power]
+    for want in ("Sleep", "Hibernate", "Shutdown"):
+        assert want in labels
+    sleep = next(e for e in power if actions.catalog_entry_label(e) == "Sleep")
+    assert actions.catalog_entry_type(sleep) == "system_power"
+    assert actions.catalog_entry_params(sleep) == {"cmd": "sleep"}
+    icon, label = actions.default_icon_for(
+        Action("system_power", {"cmd": "shutdown"}))
+    assert label == "Shutdown" and icon == "power"
+    icon, label = actions.default_icon_for(
+        Action("system_power", {"cmd": "hibernate"}))
+    assert label == "Hibernate" and icon == "lock"
+
+
 def test_twitch_catalog_has_create_clip_chip():
     twitch = dict(actions.get_action_catalog())["Twitch"]
     labels = [actions.catalog_entry_label(e) for e in twitch]
+    assert "Twitch chat" in labels
+    assert "Twitch ad countdown" in labels
+    assert "Snooze ad" in labels
     assert "Create clip" in labels
     assert "Chatterino command" in labels
+    chat = next(e for e in twitch
+                if actions.catalog_entry_label(e) == "Twitch chat")
+    assert actions.catalog_entry_type(chat) == "show_twitch_chat"
+    ad = next(e for e in twitch
+              if actions.catalog_entry_label(e) == "Twitch ad countdown")
+    assert actions.catalog_entry_type(ad) == "monitor"
+    assert actions.catalog_entry_params(ad).get("metric") == "twitchad"
+    snooze = next(e for e in twitch
+                  if actions.catalog_entry_label(e) == "Snooze ad")
+    assert actions.catalog_entry_type(snooze) == "twitch_snooze_ad"
     clip = next(e for e in twitch
                 if actions.catalog_entry_label(e) == "Create clip")
     assert actions.catalog_entry_type(clip) == "chatterino"
@@ -45,13 +94,16 @@ def test_twitch_catalog_has_create_clip_chip():
     icon, label = actions.default_icon_for(
         Action("chatterino", {"command": "/clip"}))
     assert label == "Clip" and icon == "camera"
+    icon, label = actions.default_icon_for(Action("show_twitch_chat", {}))
+    assert label == "Chat" and icon == "web"
 
 
 def test_obs_catalog_has_stream_presets():
     obs = dict(actions.get_action_catalog())["OBS"]
     labels = [actions.catalog_entry_label(e) for e in obs]
     for want in ("Go Live", "End Stream", "Record", "Stop Record",
-                 "Starting Soon", "BRB", "Live", "Game Capture", "Mic Mute"):
+                 "Starting Soon", "BRB", "Live", "Game Capture",
+                 "BRB Source", "Mic Mute"):
         assert want in labels
     go = next(e for e in obs if actions.catalog_entry_label(e) == "Go Live")
     assert actions.catalog_entry_params(go) == {"cmd": "start"}
