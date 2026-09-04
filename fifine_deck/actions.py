@@ -78,6 +78,7 @@ class ActionContext(Protocol):
     def goto_page(self, index: int) -> None: ...
     def next_page(self) -> None: ...
     def prev_page(self) -> None: ...
+    def show_twitch_chat(self, channel: str = "") -> None: ...
     def set_brightness(self, percent: int) -> None: ...
     def adjust_brightness(self, delta: int) -> None: ...
     def sleep_screen(self) -> None: ...
@@ -112,13 +113,22 @@ ACTION_TYPES: dict[str, dict] = {
     "next_page":     {"label": "Next page", "params": []},
     "prev_page":     {"label": "Previous page", "params": []},
     "goto_page":     {"label": "Go to page #", "params": [("page", "text", "Page number (1-based)")]},
+    "show_twitch_chat": {"label": "Show Twitch chat", "params": [
+        ("channel", "text", "Channel (optional; uses existing chat page if blank)")]},
     "switch_profile": {"label": "Switch profile", "params": [("profile_id", "profiles", "Profile")]},
     "next_profile":  {"label": "Next profile (Scene Shift)", "params": []},
     "prev_profile":  {"label": "Previous profile", "params": []},
     "brightness":    {"label": "Brightness", "params": [("mode", "choice:set,up,down", "Mode"), ("value", "text", "Value / step")]},
     "sleep_screen":  {"label": "Sleep screen", "params": []},
+    # KDE / power-profiles-daemon platform profiles (Performance / Balanced /
+    # Power Saver). Uses powerprofilesctl, with a D-Bus fallback.
+    "power_profile": {"label": "Power profile", "params": [
+        ("profile", "choice:performance,balanced,power-saver,cycle", "Profile")]},
+    # Whole-machine power (not the deck LCD). loginctl first, then systemctl.
+    "system_power":  {"label": "System power", "params": [
+        ("cmd", "choice:sleep,hibernate,shutdown", "Command")]},
     "monitor":       {"label": "System monitor", "params": [
-        ("metric", "choice:cpu,ram,vram,gpu,gputemp,cputemp,igpu,igpuvram,igpupower,igputemp,temp,net,disk,clock,procram,cpupower,gpupower,twitchviewers,twitchuptime", "Metric"),
+        ("metric", "choice:cpu,ram,vram,gpu,gputemp,cputemp,igpu,igpuvram,igpupower,igputemp,temp,net,disk,clock,procram,cpupower,gpupower,twitchviewers,twitchuptime,twitchad", "Metric"),
         ("style", "choice:number,gauge,graph", "Style"),
         ("interval", "text", "Refresh every (seconds)"),
         ("target", "text", "Disk / iface / temp / process / Twitch login"),
@@ -128,22 +138,25 @@ ACTION_TYPES: dict[str, dict] = {
     "open_folder":   {"label": "Open folder", "params": []},
     "folder_back":   {"label": "Back (prev page / exit folder)", "params": []},
     "multi":         {"label": "Multi-action (steps)", "params": []},  # edited specially
+    "twitch_snooze_ad": {"label": "Twitch: Snooze next ad", "params": []},
     # OBS Studio via obs-websocket v5 (Options → OBS settings for host/port/password).
+    # obs_scene / obs_input / obs_source kinds are editable combos filled from a
+    # live OBS connection when available (see ActionParamsWidget).
     "obs_scene":     {"label": "OBS: Switch scene", "params": [
-        ("scene", "text", "Scene name")]},
+        ("scene", "obs_scene", "Scene name")]},
     "obs_preview_scene": {"label": "OBS: Preview scene", "params": [
-        ("scene", "text", "Scene name")]},
+        ("scene", "obs_scene", "Scene name")]},
     "obs_transition": {"label": "OBS: Studio transition", "params": []},
     "obs_source":    {"label": "OBS: Show / hide source", "params": [
-        ("scene", "text", "Scene name"),
-        ("source", "text", "Source name"),
+        ("scene", "obs_scene", "Scene name"),
+        ("source", "obs_source", "Source name"),
         ("state", "choice:show,hide,toggle", "State")]},
     "obs_recording": {"label": "OBS: Recording", "params": [
         ("cmd", "choice:start,stop,toggle", "Command")]},
     "obs_streaming": {"label": "OBS: Streaming", "params": [
         ("cmd", "choice:start,stop,toggle", "Command")]},
     "obs_mute":      {"label": "OBS: Mute input", "params": [
-        ("input", "text", "Input / source name"),
+        ("input", "obs_input", "Input / source name"),
         ("state", "choice:mute,unmute,toggle", "State")]},
 }
 
@@ -177,13 +190,24 @@ _ACTION_CATALOG_CORE = [
          "params": {"scene": "Live"}},
         {"type": "obs_scene", "label": "Game Capture",
          "params": {"scene": "Game Capture"}},
+        {"type": "obs_source", "label": "BRB Source",
+         "params": {"scene": "Live", "source": "BRB", "state": "toggle"}},
         {"type": "obs_mute", "label": "Mic Mute",
          "params": {"input": "Mic/Aux", "state": "toggle"}},
     ]),
     ("Twitch", [
+        {"type": "show_twitch_chat", "label": "Twitch chat",
+         "params": {"channel": ""}},
+        {"type": "monitor", "label": "Twitch ad countdown",
+         "params": {"metric": "twitchad", "style": "number",
+                    "interval": "15"}},
+        {"type": "twitch_snooze_ad", "label": "Snooze ad",
+         "params": {}},
         {"type": "chatterino", "label": "Create clip",
          "params": {"command": "/clip", "window": "chatterino"}},
         "chatterino",
+        "show_twitch_chat",
+        "twitch_snooze_ad",
     ]),
     ("System", [
         "monitor",
@@ -211,6 +235,24 @@ _ACTION_CATALOG_CORE = [
          "params": {"metric": "ram"}},
         {"type": "monitor", "label": "Game process RAM",
          "params": {"metric": "procram"}},
+    ]),
+    ("Power", [
+        {"type": "system_power", "label": "Sleep",
+         "params": {"cmd": "sleep"}},
+        {"type": "system_power", "label": "Hibernate",
+         "params": {"cmd": "hibernate"}},
+        {"type": "system_power", "label": "Shutdown",
+         "params": {"cmd": "shutdown"}},
+        {"type": "power_profile", "label": "Performance",
+         "params": {"profile": "performance"}},
+        {"type": "power_profile", "label": "Balanced",
+         "params": {"profile": "balanced"}},
+        {"type": "power_profile", "label": "Power Saver",
+         "params": {"profile": "power-saver"}},
+        {"type": "power_profile", "label": "Cycle power profile",
+         "params": {"profile": "cycle"}},
+        "power_profile",
+        "system_power",
     ]),
     ("Deck",        ["next_page", "prev_page", "goto_page", "switch_profile",
                      "next_profile", "prev_profile", "brightness", "sleep_screen"]),
@@ -343,11 +385,15 @@ ACTION_DEFAULT_ICON = {
     "next_page": ("next_page", "Next"),
     "prev_page": ("prev_page", "Prev"),
     "goto_page": ("next_page", "Page"),
+    "show_twitch_chat": ("web", "Chat"),
+    "twitch_snooze_ad": ("pause", "Snooze"),
     "switch_profile": ("settings", "Profile"),
     "next_profile": ("next_page", "Scene ▶"),
     "prev_profile": ("prev_page", "Scene ◀"),
     "brightness": ("brightness_up", "Bright"),
     "sleep_screen": ("dot", "Sleep"),
+    "power_profile": ("settings", "Power"),
+    "system_power": ("power", "Power"),
     # monitor: no icon/label on purpose — the live readout IS the key face,
     # and a library icon would overpaint it between ticks.
     "monitor": ("", ""),
@@ -398,6 +444,21 @@ def default_icon_for(action) -> tuple[str, str]:
     if t == "brightness":
         return ({"up": "brightness_up", "down": "brightness_down",
                  "set": "brightness_up"}.get(_pick("mode", "set"), "brightness_up"), "Bright")
+    if t == "power_profile":
+        return ({
+            "performance": ("brightness_up", "Perf"),
+            "balanced": ("settings", "Balanced"),
+            "power-saver": ("brightness_down", "Saver"),
+            "cycle": ("next_page", "Cycle ⚡"),
+        }.get(_pick("profile", "balanced"), ("settings", "Power")))
+    if t == "system_power":
+        return ({
+            "sleep": ("brightness_down", "Sleep"),
+            "suspend": ("brightness_down", "Sleep"),
+            "hibernate": ("lock", "Hibernate"),
+            "shutdown": ("power", "Shutdown"),
+            "poweroff": ("power", "Shutdown"),
+        }.get(_pick("cmd", "sleep"), ("power", "Power")))
     if t == "obs_recording":
         return ({"start": ("play", "Record"), "stop": ("stop", "Stop Rec"),
                  "toggle": ("stop", "Record")}
@@ -426,6 +487,9 @@ def default_icon_for(action) -> tuple[str, str]:
         short = scene.strip()[:10] if scene.strip() else "Scene"
         return ("camera", short)
     if t == "obs_source":
+        src = _pick("source", "").strip().lower()
+        if src in ("brb", "be right back", "be-right-back", "away"):
+            return ("dot", "BRB Src")
         return ({"show": "dot", "hide": "dot", "toggle": "dot"}
                 .get(_pick("state", "toggle"), "dot"), "Source")
     if t == "chatterino":
@@ -846,6 +910,16 @@ def _focus_app_window(hint: str) -> bool:
     return False
 
 
+def _twitch_snooze_ad() -> None:
+    """Push the next Ads Manager mid-roll back (~5 minutes)."""
+    from . import twitch
+    ok, msg = twitch.snooze_next_ad()
+    if ok:
+        log.info("Twitch snooze: %s", msg)
+    else:
+        log.warning("Twitch snooze: %s", msg)
+
+
 def _chatterino_command(command: str = "/clip",
                         window: str = "chatterino") -> None:
     """Focus Chatterino and run a chat command (default: /clip).
@@ -931,6 +1005,185 @@ def _volume(cmd: str, step: str) -> None:
         log.warning("volume control needs pipewire (wpctl) or pulseaudio (pactl)")
 
 
+# power-profiles-daemon names used by KDE Plasma's battery applet.
+_POWER_PROFILES = ("power-saver", "balanced", "performance")
+_POWER_PROFILE_ALIASES = {
+    "performance": "performance",
+    "perf": "performance",
+    "high": "performance",
+    "balanced": "balanced",
+    "balance": "balanced",
+    "default": "balanced",
+    "power-saver": "power-saver",
+    "power_saver": "power-saver",
+    "powersaver": "power-saver",
+    "saver": "power-saver",
+    "eco": "power-saver",
+    "power-save": "power-saver",
+    "powersave": "power-saver",
+}
+
+
+def _normalize_power_profile(name: str) -> str:
+    key = (name or "").strip().lower().replace(" ", "-")
+    return _POWER_PROFILE_ALIASES.get(key, "")
+
+
+def _power_profiles_available() -> list[str]:
+    """Return installed profile names in canonical order, or the defaults."""
+    if _has("powerprofilesctl"):
+        try:
+            out = _run_out(["powerprofilesctl", "list"])
+        except Exception:
+            out = ""
+        found = []
+        for line in out.splitlines():
+            # Lines look like "  balanced:" or "* performance:"
+            text = line.strip().lstrip("*").strip().rstrip(":")
+            if text in _POWER_PROFILES and text not in found:
+                found.append(text)
+        if found:
+            return [p for p in _POWER_PROFILES if p in found]
+    return list(_POWER_PROFILES)
+
+
+def _power_profile_get() -> str:
+    if _has("powerprofilesctl"):
+        try:
+            cur = _run_out(["powerprofilesctl", "get"]).strip()
+            if cur in _POWER_PROFILES:
+                return cur
+        except Exception:
+            log.debug("powerprofilesctl get failed", exc_info=True)
+    # D-Bus fallback (system bus, power-profiles-daemon).
+    if _has("busctl"):
+        try:
+            out = _run_out([
+                "busctl", "--system", "get-property",
+                "org.freedesktop.UPower.PowerProfiles",
+                "/org/freedesktop/UPower/PowerProfiles",
+                "org.freedesktop.UPower.PowerProfiles", "ActiveProfile",
+            ])
+            # busctl prints: s "balanced"
+            for tok in out.replace('"', " ").split():
+                if tok in _POWER_PROFILES:
+                    return tok
+        except Exception:
+            log.debug("busctl ActiveProfile failed", exc_info=True)
+    return ""
+
+
+def _power_profile_set(profile: str) -> bool:
+    profile = _normalize_power_profile(profile)
+    if not profile:
+        return False
+    if _has("powerprofilesctl"):
+        try:
+            r = subprocess.run(
+                ["powerprofilesctl", "set", profile],
+                timeout=8, env=child_env(),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=False)
+            if r.returncode == 0:
+                log.info("power profile → %s", profile)
+                return True
+        except Exception:
+            log.debug("powerprofilesctl set %s failed", profile, exc_info=True)
+    if _has("busctl"):
+        try:
+            r = subprocess.run(
+                [
+                    "busctl", "--system", "set-property",
+                    "org.freedesktop.UPower.PowerProfiles",
+                    "/org/freedesktop/UPower/PowerProfiles",
+                    "org.freedesktop.UPower.PowerProfiles", "ActiveProfile",
+                    "s", profile,
+                ],
+                timeout=8, env=child_env(),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=False)
+            if r.returncode == 0:
+                log.info("power profile → %s (D-Bus)", profile)
+                return True
+        except Exception:
+            log.debug("busctl set ActiveProfile %s failed", profile, exc_info=True)
+    log.warning(
+        "power profile: need powerprofilesctl or power-profiles-daemon "
+        "(KDE Plasma battery applet / powerdevil)")
+    return False
+
+
+def _power_profile(profile: str = "balanced") -> None:
+    """Set or cycle the system power profile (KDE / power-profiles-daemon)."""
+    raw = (profile or "balanced").strip().lower()
+    if raw in ("cycle", "next", "toggle"):
+        available = _power_profiles_available()
+        if not available:
+            log.warning("power profile cycle: no profiles available")
+            return
+        cur = _power_profile_get()
+        try:
+            i = available.index(cur)
+        except ValueError:
+            i = -1
+        nxt = available[(i + 1) % len(available)]
+        _power_profile_set(nxt)
+        return
+    name = _normalize_power_profile(raw)
+    if not name:
+        log.warning("power profile: unknown profile %r "
+                    "(use performance, balanced, power-saver, or cycle)",
+                    profile)
+        return
+    _power_profile_set(name)
+
+
+def _system_power(cmd: str = "sleep") -> None:
+    """Suspend, hibernate, or shut down the machine (not the deck screen)."""
+    raw = (cmd or "sleep").strip().lower()
+    # Map chip cmds → systemd / loginctl verbs.
+    verb = {
+        "sleep": "suspend",
+        "suspend": "suspend",
+        "hibernate": "hibernate",
+        "shutdown": "poweroff",
+        "poweroff": "poweroff",
+        "halt": "poweroff",
+    }.get(raw)
+    if not verb:
+        log.warning("system power: unknown cmd %r "
+                    "(use sleep, hibernate, or shutdown)", cmd)
+        return
+    # Prefer loginctl (session bus / polkit for the logged-in user), then
+    # systemctl. Detach so a slow power transition cannot stall the worker.
+    attempts: list[list[str]] = []
+    if _has("loginctl"):
+        attempts.append(["loginctl", verb])
+    if _has("systemctl"):
+        attempts.append(["systemctl", verb])
+    if not attempts:
+        log.warning("system power: need loginctl or systemctl")
+        return
+    for argv in attempts:
+        try:
+            r = subprocess.run(
+                argv, timeout=8, env=child_env(),
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                check=False)
+        except Exception as e:
+            log.warning("system power %s via %s failed: %s",
+                        verb, argv[0], e)
+            continue
+        if r.returncode == 0:
+            log.info("system power → %s (%s)", verb, argv[0])
+            return
+        err = (r.stderr or b"").decode("utf-8", errors="replace").strip()
+        log.warning("system power %s via %s exited %s%s",
+                    verb, argv[0], r.returncode,
+                    f": {err}" if err else "")
+    log.warning("system power: could not %s (polkit / permissions?)", verb)
+
+
 # Must match model._iter_step_action_dicts: the import warning walks nested
 # multi-steps only this deep, so anything the executor would run BELOW that
 # depth would run without ever being listed in the "this config runs shell
@@ -976,14 +1229,45 @@ _OBS_SCENE_ALIASES: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# Source / scene-item aliases (overlays inside a scene).
+_OBS_SOURCE_ALIASES: dict[str, tuple[str, ...]] = {
+    "brb": (
+        "brb", "be right back", "be-right-back", "away", "brb overlay",
+        "brb screen", "brb source",
+    ),
+    "webcam": ("webcam", "camera", "cam", "facecam", "face cam", "face-cam"),
+    "game capture": (
+        "game capture", "game", "gaming", "gameplay", "game source",
+    ),
+    "alert": ("alert", "alerts", "streamlabs", "streamelements", "se alerts"),
+}
+
 _OBS_MIC_ALIASES: tuple[str, ...] = (
     "mic/aux", "mic", "microphone", "mic aux", "analog mic", "usb mic",
-    "headset", "voice",
+    "headset", "voice", "mic 1", "mic1", "audio input capture",
+)
+
+# OBS inputKind fragments that usually mean a mute-able microphone.
+_OBS_AUDIO_INPUT_KIND_HINTS: tuple[str, ...] = (
+    "input_capture", "microphone", "wasapi_input", "pulse_input",
+    "coreaudio_input", "alsa_input", "audiocapture", "audio_capture",
 )
 
 
 def _norm_obs_name(name: str) -> str:
     return "".join(ch for ch in name.casefold() if ch.isalnum())
+
+
+def _wanted_is_mic(wanted: str) -> bool:
+    want_n = _norm_obs_name(wanted)
+    return want_n in {_norm_obs_name(a) for a in _OBS_MIC_ALIASES} or want_n in (
+        "micaux", "mic",
+    )
+
+
+def _is_audio_input_kind(kind: str) -> bool:
+    k = (kind or "").casefold()
+    return any(h in k for h in _OBS_AUDIO_INPUT_KIND_HINTS)
 
 
 def _match_obs_name(wanted: str, candidates: list[str],
@@ -1028,6 +1312,267 @@ def _match_obs_name(wanted: str, candidates: list[str],
     return None
 
 
+def _obs_call(host: str, port: int, password: str, request_type: str,
+              request_data: dict | None = None) -> Optional[dict]:
+    from . import obs_ws
+    return obs_ws.call(host, port, password, request_type, request_data)
+
+
+def list_obs_scenes(host: str, port: int, password: str) -> list[str]:
+    """Scene names from a live OBS, or [] if unreachable."""
+    data = _obs_call(host, port, password, "GetSceneList")
+    if not data:
+        return []
+    # Prefer current program scene first so it is easy to pick in combos.
+    current = ""
+    cur = data.get("currentProgramSceneName")
+    if isinstance(cur, str) and cur.strip():
+        current = cur.strip()
+    names = [
+        str(s.get("sceneName"))
+        for s in (data.get("scenes") or [])
+        if isinstance(s, dict) and s.get("sceneName")
+    ]
+    if current and current in names:
+        names = [current] + [n for n in names if n != current]
+    return names
+
+
+def list_obs_current_scene(host: str, port: int, password: str) -> str:
+    """Current program scene name, or "" if OBS is unreachable."""
+    data = _obs_call(host, port, password, "GetCurrentProgramScene")
+    if data and isinstance(data.get("currentProgramSceneName"), str):
+        return data["currentProgramSceneName"].strip()
+    # Older responses / GetSceneList fallback.
+    data = _obs_call(host, port, password, "GetSceneList")
+    if data and isinstance(data.get("currentProgramSceneName"), str):
+        return data["currentProgramSceneName"].strip()
+    return ""
+
+
+def list_obs_inputs(host: str, port: int, password: str,
+                    *, audio_first: bool = True) -> list[str]:
+    """Input names from OBS. Audio capture inputs are listed first when known."""
+    data = _obs_call(host, port, password, "GetInputList")
+    if not data:
+        return []
+    audio: list[str] = []
+    other: list[str] = []
+    for item in (data.get("inputs") or []):
+        if not isinstance(item, dict) or not item.get("inputName"):
+            continue
+        name = str(item["inputName"])
+        kind = str(item.get("inputKind") or "")
+        if audio_first and _is_audio_input_kind(kind):
+            audio.append(name)
+        else:
+            other.append(name)
+    # Prefer OBS "special" mic slots when present (Mic/Aux mapping).
+    special = _obs_call(host, port, password, "GetSpecialInputs") or {}
+    mics: list[str] = []
+    for key in ("mic1", "mic2", "mic3", "mic4"):
+        val = special.get(key)
+        if isinstance(val, str) and val.strip():
+            mics.append(val.strip())
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for name in mics + audio + other:
+        if name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return ordered
+
+
+def list_obs_scene_sources(host: str, port: int, password: str,
+                           scene: str = "") -> list[str]:
+    """Source (scene item) names inside ``scene``, resolving scene aliases.
+
+    When ``scene`` is blank, uses the current program scene so the source
+    dropdown can fill as soon as OBS is connected.
+    """
+    scene = (scene or "").strip()
+    if not scene:
+        scene = list_obs_current_scene(host, port, password)
+    if not scene:
+        return []
+    scenes = list_obs_scenes(host, port, password)
+    resolved = _match_obs_name(scene, scenes, _OBS_SCENE_ALIASES) if scenes else scene
+    if not resolved:
+        resolved = scene
+    data = _obs_call(host, port, password, "GetSceneItemList",
+                     {"sceneName": resolved})
+    if not data:
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in (data.get("sceneItems") or []):
+        if not isinstance(item, dict):
+            continue
+        name = item.get("sourceName")
+        if not name:
+            continue
+        s = str(name)
+        if s not in seen:
+            seen.add(s)
+            names.append(s)
+    return names
+
+
+def list_obs_all_sources(host: str, port: int, password: str) -> list[str]:
+    """Unique source names across every scene (current scene's items first)."""
+    scenes = list_obs_scenes(host, port, password)
+    if not scenes:
+        return []
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for sc in scenes:
+        for name in list_obs_scene_sources(host, port, password, sc):
+            if name not in seen:
+                seen.add(name)
+                ordered.append(name)
+    return ordered
+
+
+def resolve_obs_editor_field(kind: str, wanted: str, host: str, port: int,
+                             password: str, *, scene: str = "") -> str:
+    """Map a chip placeholder to a live OBS name for the action editor.
+
+    Returns ``wanted`` unchanged when OBS is offline or nothing matches.
+    """
+    wanted = (wanted or "").strip()
+    if kind == "obs_scene":
+        scenes = list_obs_scenes(host, port, password)
+        if not scenes:
+            return wanted
+        if not wanted:
+            return scenes[0]
+        return _match_obs_name(wanted, scenes, _OBS_SCENE_ALIASES) or wanted
+    if kind == "obs_input":
+        if wanted:
+            matched = _detect_obs_input(host, port, password, wanted)
+            if matched:
+                return matched
+            return wanted
+        names = list_obs_inputs(host, port, password)
+        return names[0] if names else ""
+    if kind == "obs_source":
+        sources = list_obs_scene_sources(host, port, password, scene)
+        if not sources:
+            sources = list_obs_all_sources(host, port, password)
+        if not sources:
+            return wanted
+        if not wanted:
+            return sources[0]
+        matched = _match_obs_name(wanted, sources, _OBS_SOURCE_ALIASES)
+        return matched or wanted
+    return wanted
+
+
+def obs_connection_summary(host: str, port: int, password: str) -> tuple[bool, str]:
+    """(connected, short status) for the action-editor OBS hint line."""
+    from . import obs_ws
+    if not obs_ws.ensure(host, port, password):
+        return False, "OBS offline — type names, or fix Options → OBS settings"
+    scenes = list_obs_scenes(host, port, password)
+    inputs = list_obs_inputs(host, port, password)
+    current = list_obs_current_scene(host, port, password)
+    parts = [f"{len(scenes)} scene" + ("s" if len(scenes) != 1 else ""),
+             f"{len(inputs)} input" + ("s" if len(inputs) != 1 else "")]
+    if current:
+        parts.append(f"live: {current}")
+    return True, "OBS connected · " + " · ".join(parts)
+
+
+def autofill_obs_params(action_type: str, params: dict,
+                        host: str, port: int, password: str) -> dict:
+    """Rewrite chip params to real OBS names when the websocket is up.
+
+    Used when dropping OBS catalog chips so Mic Mute / BRB / BRB Source land
+    on whatever the user's OBS actually named those items. Leaves params
+    unchanged when OBS is offline or nothing matches.
+    """
+    out = dict(params or {})
+    atype = (action_type or "").strip()
+
+    if atype in ("obs_scene", "obs_preview_scene"):
+        wanted = str(out.get("scene", "") or "").strip()
+        if wanted:
+            scenes = list_obs_scenes(host, port, password)
+            matched = _match_obs_name(wanted, scenes, _OBS_SCENE_ALIASES)
+            if matched:
+                out["scene"] = matched
+        return out
+
+    if atype == "obs_mute":
+        wanted = str(out.get("input", "") or "").strip()
+        if wanted:
+            matched = _detect_obs_input(host, port, password, wanted)
+            if matched:
+                out["input"] = matched
+        return out
+
+    if atype == "obs_source":
+        scene_wanted = str(out.get("scene", "") or "").strip()
+        source_wanted = str(out.get("source", "") or "").strip()
+        scenes = list_obs_scenes(host, port, password) if scene_wanted else []
+        resolved_scene = (
+            _match_obs_name(scene_wanted, scenes, _OBS_SCENE_ALIASES)
+            if scene_wanted and scenes else None
+        )
+        if resolved_scene:
+            out["scene"] = resolved_scene
+            scene_for_sources = resolved_scene
+        else:
+            scene_for_sources = scene_wanted
+        if source_wanted and scene_for_sources:
+            sources = list_obs_scene_sources(
+                host, port, password, scene_for_sources)
+            # If the configured scene had no BRB-like source, also scan other
+            # scenes so a "BRB Source" chip still finds an overlay elsewhere.
+            matched = _match_obs_name(
+                source_wanted, sources, _OBS_SOURCE_ALIASES)
+            if matched is None and _norm_obs_name(source_wanted) in {
+                    _norm_obs_name(a) for group in _OBS_SOURCE_ALIASES.values()
+                    for a in group} | {_norm_obs_name(k)
+                                       for k in _OBS_SOURCE_ALIASES}:
+                for sc in scenes:
+                    if sc == scene_for_sources:
+                        continue
+                    alt = list_obs_scene_sources(host, port, password, sc)
+                    matched = _match_obs_name(
+                        source_wanted, alt, _OBS_SOURCE_ALIASES)
+                    if matched:
+                        out["scene"] = sc
+                        break
+            if matched:
+                out["source"] = matched
+        return out
+
+    return out
+
+
+def _detect_obs_input(host: str, port: int, password: str,
+                      wanted: str) -> str | None:
+    """Resolve a mute-chip input name against special mics + input list."""
+    wanted = (wanted or "").strip()
+    if not wanted:
+        return None
+    if _wanted_is_mic(wanted):
+        special = _obs_call(host, port, password, "GetSpecialInputs") or {}
+        for key in ("mic1", "mic2", "mic3", "mic4"):
+            val = special.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    names = list_obs_inputs(host, port, password, audio_first=True)
+    if not names:
+        return None
+    aliases = {"mic/aux": _OBS_MIC_ALIASES, "mic": _OBS_MIC_ALIASES}
+    matched = _match_obs_name(wanted, names, aliases)
+    if matched is None and _wanted_is_mic(wanted):
+        matched = _match_obs_name("Mic/Aux", names, aliases)
+    return matched
+
+
 def _resolve_obs_scene_name(context: ActionContext | None, wanted: str
                             ) -> str | None:
     """Map a chip scene label to a real OBS scene name when possible."""
@@ -1061,27 +1606,59 @@ def _resolve_obs_input_name(context: ActionContext | None, wanted: str
     wanted = (wanted or "").strip()
     if not wanted:
         return None
-    data = _obs_request(context, "GetInputList")
-    if data is None:
+    conn = _obs_conn(context)
+    if conn is None:
         return wanted
-    names = [
-        str(i.get("inputName"))
-        for i in (data.get("inputs") or [])
-        if isinstance(i, dict) and i.get("inputName")
-    ]
-    if not names:
-        return wanted
-    aliases = {"mic/aux": _OBS_MIC_ALIASES, "mic": _OBS_MIC_ALIASES}
-    matched = _match_obs_name(wanted, names, aliases)
-    if matched is None and _norm_obs_name(wanted) in {
-            _norm_obs_name(a) for a in _OBS_MIC_ALIASES}:
-        matched = _match_obs_name("Mic/Aux", names, aliases)
+    matched = _detect_obs_input(conn[0], conn[1], conn[2], wanted)
     if matched is None:
+        # Fall back to raw GetInputList names for the warning / last try.
+        data = _obs_request(context, "GetInputList")
+        names = [
+            str(i.get("inputName"))
+            for i in ((data or {}).get("inputs") or [])
+            if isinstance(i, dict) and i.get("inputName")
+        ] if data else []
+        if not names:
+            return wanted
         log.warning("OBS: no input matching %r (have: %s)",
                     wanted, ", ".join(names[:16]))
         return None
     if matched != wanted:
         log.info("OBS: resolved input %r → %r", wanted, matched)
+    return matched
+
+
+def _resolve_obs_source_name(context: ActionContext | None, scene: str,
+                             wanted: str, *, warn: bool = True
+                             ) -> str | None:
+    """Map a chip source label to a real scene-item name in ``scene``.
+
+    Returns ``wanted`` unchanged when OBS is unreachable (same offline
+    behaviour as scene/input resolve). Returns None when OBS answered but
+    nothing matched — callers may then scan other scenes.
+    """
+    wanted = (wanted or "").strip()
+    if not wanted:
+        return None
+    data = _obs_request(context, "GetSceneItemList", {"sceneName": scene})
+    if data is None:
+        return wanted
+    names = [
+        str(i.get("sourceName"))
+        for i in (data.get("sceneItems") or [])
+        if isinstance(i, dict) and i.get("sourceName")
+    ]
+    if not names:
+        return None
+    matched = _match_obs_name(wanted, names, _OBS_SOURCE_ALIASES)
+    if matched is None:
+        if warn:
+            log.warning("OBS: no source matching %r in scene %r (have: %s)",
+                        wanted, scene, ", ".join(names[:16]))
+        return None
+    if matched != wanted:
+        log.info("OBS: resolved source %r → %r (scene %r)",
+                 wanted, matched, scene)
     return matched
 
 
@@ -1101,6 +1678,55 @@ def _obs_transition(context: ActionContext | None) -> None:
     _obs_request(context, "TriggerStudioModeTransition")
 
 
+def _source_alias_wanted(wanted: str) -> bool:
+    """True when ``wanted`` looks like a known source alias (e.g. BRB)."""
+    want_n = _norm_obs_name(wanted)
+    if not want_n:
+        return False
+    for key, aliases in _OBS_SOURCE_ALIASES.items():
+        pool = {_norm_obs_name(key), *(_norm_obs_name(a) for a in aliases)}
+        if want_n in pool or any(a and (a in want_n or want_n in a) for a in pool):
+            return True
+    return False
+
+
+def _find_obs_source(context: ActionContext | None, scene: str,
+                     source: str) -> tuple[str, str] | None:
+    """Resolve (scene, source) against OBS, scanning other scenes for aliases."""
+    resolved_scene = _resolve_obs_scene_name(context, scene)
+    if not resolved_scene:
+        return None
+    resolved_source = _resolve_obs_source_name(
+        context, resolved_scene, source, warn=False)
+    if resolved_source:
+        return resolved_scene, resolved_source
+    if not _source_alias_wanted(source):
+        # Not an alias chip — warn once for the configured scene.
+        _resolve_obs_source_name(context, resolved_scene, source, warn=True)
+        return None
+    data = _obs_request(context, "GetSceneList")
+    scenes = [
+        str(s.get("sceneName"))
+        for s in ((data or {}).get("scenes") or [])
+        if isinstance(s, dict) and s.get("sceneName")
+    ] if data else []
+    for sc in scenes:
+        if sc == resolved_scene:
+            continue
+        alt = _resolve_obs_source_name(context, sc, source, warn=False)
+        # Offline fallback returns the raw wanted name — only accept a real
+        # match from a scene that actually listed items.
+        if alt and alt != source:
+            log.info("OBS: found source %r as %r on scene %r",
+                     source, alt, sc)
+            return sc, alt
+        if alt and _norm_obs_name(alt) == _norm_obs_name(source):
+            # Exact (case-insensitive) hit on another scene.
+            return sc, alt
+    log.warning("OBS: no source matching %r in any scene", source)
+    return None
+
+
 def _obs_source(context: ActionContext | None, scene: str, source: str,
                 state: str) -> None:
     scene = (scene or "").strip()
@@ -1109,17 +1735,19 @@ def _obs_source(context: ActionContext | None, scene: str, source: str,
     if not scene or not source:
         log.warning("OBS source action needs both scene and source names")
         return
-    resolved_scene = _resolve_obs_scene_name(context, scene)
-    if not resolved_scene:
+    found = _find_obs_source(context, scene, source)
+    if not found:
         return
+    resolved_scene, resolved_source = found
     info = _obs_request(context, "GetSceneItemId",
-                        {"sceneName": resolved_scene, "sourceName": source})
+                        {"sceneName": resolved_scene,
+                         "sourceName": resolved_source})
     if info is None:
         return
     item_id = info.get("sceneItemId")
     if item_id is None:
         log.warning("OBS: no scene item id for %r in scene %r",
-                    source, resolved_scene)
+                    resolved_source, resolved_scene)
         return
     if state == "toggle":
         cur = _obs_request(context, "GetSceneItemEnabled",
@@ -1250,10 +1878,16 @@ def execute(action, context: ActionContext | None = None,
         elif t == "chatterino":
             _chatterino_command(p.get("command", "/clip"),
                                 p.get("window", "chatterino"))
+        elif t == "twitch_snooze_ad":
+            _twitch_snooze_ad()
         elif t == "monitor":
             return    # display-only key: pressing it does nothing
         elif t == "sleep_screen" and context:
             context.sleep_screen()
+        elif t == "power_profile":
+            _power_profile(p.get("profile", "balanced"))
+        elif t == "system_power":
+            _system_power(p.get("cmd", "sleep"))
         elif t == "next_profile" and context:
             context.next_profile()
         elif t == "prev_profile" and context:
@@ -1269,6 +1903,8 @@ def execute(action, context: ActionContext | None = None,
                 _page = 1        # a bad value must not silently drop the action
                                  # (OverflowError: int(float("1e999")) -> inf)
             context.goto_page(_page - 1)
+        elif t == "show_twitch_chat" and context:
+            context.show_twitch_chat(str(p.get("channel", "") or ""))
         elif t == "switch_profile" and context:
             context.switch_profile(p.get("profile_id", ""))
         elif t == "brightness" and context:
