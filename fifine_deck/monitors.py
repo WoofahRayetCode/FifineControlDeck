@@ -58,6 +58,7 @@ METRICS = {
     "gpupower": "GPU W",
     "twitchviewers": "LIVE",
     "twitchuptime": "UPTIME",
+    "twitchad": "AD",
 }
 STYLES = ("number", "gauge", "graph")
 # Clock faces: "auto" keeps the 0.7.0 behavior (seconds iff refreshing under
@@ -80,6 +81,7 @@ PERCENT_METRICS = frozenset({
 # process name for procram, or Twitch channel login)
 TARGETED_METRICS = frozenset({
     "disk", "net", "temp", "procram", "twitchviewers", "twitchuptime",
+    "twitchad",
 })
 
 HISTORY_LEN = 32             # sparkline points kept per metric
@@ -817,6 +819,29 @@ class Sampler:
         pct = max(0.0, min(100.0, minutes))
         return Reading(pct, twitch.fmt_uptime(secs), info.login or login,
                        sample=secs)
+
+    def _sample_twitchad(self, spec: MonitorSpec) -> Reading:
+        """Countdown to the next scheduled Twitch mid-roll (Ads Manager)."""
+        from . import twitch
+        logged_in, who = twitch.user_login_status()
+        if not logged_in:
+            return Reading(None, "login", "ads OAuth", ok=False)
+        sched = twitch.get_ad_schedule()
+        if sched is None:
+            return Reading(None, "n/a", "Twitch?", ok=False)
+        sub = who or "ads"
+        until = sched.seconds_until_ad
+        if until is None:
+            return Reading(None, "—", sub, sample=None)
+        if until <= 0:
+            dur = f"{sched.duration}s" if sched.duration else "ad"
+            return Reading(100.0, "NOW", dur, sample=0.0)
+        # Soft gauge: 0 at 100+ minutes out, 100 when the break is imminent.
+        minutes = until / 60.0
+        pct = max(0.0, min(100.0, 100.0 - minutes))
+        dur = f"{sched.duration}s" if sched.duration else sub
+        return Reading(pct, twitch.fmt_ad_countdown(until), dur,
+                       sample=float(until))
 
 
 _NO_PSUTIL = Reading(None, "n/a", "psutil missing", ok=False)
