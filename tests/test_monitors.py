@@ -13,7 +13,7 @@ import pytest
 from PIL import Image
 
 from fifine_deck import monitors
-from fifine_deck.actions import ACTION_CATALOG, ACTION_TYPES, execute
+from fifine_deck.actions import ACTION_TYPES, execute
 from fifine_deck.model import Action
 from fifine_deck.monitors import MonitorSpec, Reading, Sampler, render_monitor
 
@@ -69,15 +69,23 @@ def test_first_cpu_sample_is_a_warmup_not_a_fake_zero():
     assert second.pct is not None and second.text.endswith("%")
 
 
-def test_spec_target_only_applies_to_disk_and_net():
+def test_spec_target_only_applies_to_targeted_metrics():
     # A stray target on cpu/ram/vram would split the shared sample stream —
     # and cpu/net use global since-last-call state, so split streams corrupt
-    # each other's deltas.
+    # each other's deltas. procram keeps its process-name target.
     assert MonitorSpec.from_params({"metric": "cpu", "target": "x"}).target == ""
     assert MonitorSpec.from_params({"metric": "ram", "target": "x"}).target == ""
     assert MonitorSpec.from_params({"metric": "vram", "target": "x"}).target == ""
+    assert MonitorSpec.from_params({"metric": "cpupower", "target": "x"}).target == ""
+    assert MonitorSpec.from_params({"metric": "gpupower", "target": "x"}).target == ""
     assert MonitorSpec.from_params({"metric": "disk", "target": "/x"}).target == "/x"
     assert MonitorSpec.from_params({"metric": "net", "target": "eth0"}).target == "eth0"
+    assert MonitorSpec.from_params(
+        {"metric": "procram", "target": "steam"}).target == "steam"
+    assert MonitorSpec.from_params(
+        {"metric": "twitchviewers", "target": "shroud"}).target == "shroud"
+    assert MonitorSpec.from_params(
+        {"metric": "twitchuptime", "target": "shroud"}).target == "shroud"
 
 
 def test_failed_samples_leave_history_gaps_not_zeros():
@@ -213,8 +221,10 @@ def test_render_actually_draws_something():
 # Action-type integration
 # ---------------------------------------------------------------------------
 def test_monitor_is_a_registered_action_type():
+    from fifine_deck.actions import catalog_entry_type, get_action_catalog
     assert "monitor" in ACTION_TYPES
-    keys = [k for _, kinds in ACTION_CATALOG for k in kinds]
+    keys = [catalog_entry_type(k) for _, kinds in get_action_catalog()
+            for k in kinds]
     assert "monitor" in keys
     param_names = [p[0] for p in ACTION_TYPES["monitor"]["params"]]
     assert param_names == ["metric", "style", "interval", "target",
@@ -650,6 +660,94 @@ def test_gpu_none_backend_degrades(monkeypatch):
     monkeypatch.setattr(monitors, "_probe_gpu", lambda: ("none",))
     r = Sampler().sample(MonitorSpec.from_params({"metric": "gpu"}))
     assert not r.ok and r.text == "n/a"
+
+
+def test_igpu_metrics_are_registered():
+    for m in ("igpu", "igpuvram", "igpupower", "igputemp"):
+        assert m in monitors.METRICS
+        assert MonitorSpec.from_params({"metric": m}).metric == m
+    assert "igpu" in monitors.PERCENT_METRICS
+    assert "igpuvram" in monitors.PERCENT_METRICS
+    assert "igputemp" in monitors.PERCENT_METRICS
+    assert "igpupower" not in monitors.PERCENT_METRICS
+    assert "cputemp" in monitors.METRICS
+    assert "cputemp" in monitors.PERCENT_METRICS
+
+
+def test_cputemp_prefers_cpu_chip(monkeypatch):
+    Entry = namedtuple("Entry", "label current")
+
+    def fake_temps():
+        return {
+            "nvme": [Entry("Composite", 40.0)],
+            "k10temp": [Entry("Tctl", 55.5), Entry("Tccd1", 50.0)],
+        }
+
+    monkeypatch.setattr(monitors.psutil, "sensors_temperatures", fake_temps)
+    r = Sampler().sample(MonitorSpec.from_params({"metric": "cputemp"}))
+    assert r.ok and r.sample == pytest.approx(55.5)
+    assert r.text == "56°C"
+
+
+def test_igputemp_amdgpu_sysfs_backend(tmp_path, monkeypatch):
+    temp = tmp_path / "temp1_input"
+    temp.write_text("47000\n")  # millidegrees
+    monkeypatch.setattr(monitors, "_probe_igputemp",
+                        lambda final=False: ("amdgpu", str(temp), "edge"))
+    r = Sampler().sample(MonitorSpec.from_params({"metric": "igputemp"}))
+    assert r.ok and r.sample == pytest.approx(47.0)
+    assert r.text == "47°C"
+
+
+def test_igpu_none_backend_degrades(monkeypatch):
+    monkeypatch.setattr(monitors, "_probe_igpu", lambda final=False: ("none",))
+    r = Sampler().sample(MonitorSpec.from_params({"metric": "igpu"}))
+    assert not r.ok and r.text == "n/a" and r.sub == "no iGPU"
+
+
+def test_igpu_amdgpu_sysfs_backend(tmp_path, monkeypatch):
+    busy = tmp_path / "gpu_busy_percent"
+    busy.write_text("22\n")
+    monkeypatch.setattr(monitors, "_probe_igpu",
+                        lambda final=False: ("amdgpu", str(busy)))
+    r = Sampler().sample(MonitorSpec.from_params({"metric": "igpu"}))
+    assert r.ok and r.pct == pytest.approx(22.0) and r.text == "22%"
+
+
+def test_igpuvram_amdgpu_sysfs_backend(tmp_path, monkeypatch):
+    used = tmp_path / "mem_info_vram_used"
+    total = tmp_path / "mem_info_vram_total"
+    used.write_text(str(256 * 1024 * 1024))
+    total.write_text(str(512 * 1024 * 1024))
+    monkeypatch.setattr(monitors, "_probe_igpuvram",
+                        lambda final=False: ("amdgpu", str(used), str(total)))
+    r = Sampler().sample(MonitorSpec.from_params({"metric": "igpuvram"}))
+    assert r.ok and r.pct == pytest.approx(50.0)
+
+
+def test_igpupower_amdgpu_sysfs_backend(tmp_path, monkeypatch):
+    power = tmp_path / "power1_input"
+    power.write_text("4500000\n")  # 4.5 W in microwatts
+    monkeypatch.setattr(monitors, "_probe_igpupower",
+                        lambda final=False: ("amdgpu", str(power), "input"))
+    r = Sampler().sample(MonitorSpec.from_params({"metric": "igpupower"}))
+    assert r.ok and r.sample == pytest.approx(4.5)
+
+
+def test_igpu_card_dirs_skip_nvidia(tmp_path, monkeypatch):
+    """Hybrid: NVIDIA card1 + AMD card2 → only the AMD card is the iGPU."""
+    card1 = tmp_path / "card1" / "device"
+    card2 = tmp_path / "card2" / "device"
+    card1.mkdir(parents=True)
+    card2.mkdir(parents=True)
+    (card1 / "vendor").write_text("0x10de\n")
+    (card2 / "vendor").write_text("0x1002\n")
+    (card2 / "gpu_busy_percent").write_text("11\n")
+    monkeypatch.setattr(monitors, "_drm_card_dirs",
+                        lambda: [str(tmp_path / "card1"), str(tmp_path / "card2")])
+    assert monitors._igpu_card_dirs() == [str(tmp_path / "card2")]
+    assert monitors._probe_igpu() == (
+        "amdgpu", str(card2 / "gpu_busy_percent"))
 
 
 def test_gpu_amdgpu_sysfs_backend(tmp_path, monkeypatch):
@@ -1542,3 +1640,198 @@ def test_monitor_render_survives_a_newline_in_the_readout():
     for size in (72, 96, 100):
         assert monitors.render_monitor(size, spec, reading, []) is not None, \
             f"render_monitor failed at {size} px"
+
+
+# ---------------------------------------------------------------------------
+# procram / cpupower / gpupower
+# ---------------------------------------------------------------------------
+def test_action_catalog_lists_new_monitor_metrics():
+    choice = ACTION_TYPES["monitor"]["params"][0][1]
+    for metric in ("procram", "cpupower", "gpupower"):
+        assert metric in choice, metric
+        assert metric in monitors.METRICS
+
+
+def test_procram_requires_a_process_name():
+    pytest.importorskip("psutil")
+    r = Sampler().sample(MonitorSpec.from_params({"metric": "procram"}))
+    assert not r.ok and r.text == "n/a"
+    assert "process" in r.sub
+
+
+def test_procram_matches_named_process(monkeypatch):
+    psutil = pytest.importorskip("psutil")
+    Mem = namedtuple("Mem", "rss")
+    Proc = namedtuple("Proc", "info")
+
+    class _P:
+        def __init__(self, name, rss):
+            self.info = {"name": name, "memory_info": Mem(rss)}
+
+        def exe(self):
+            return f"/usr/bin/{self.info['name']}"
+
+    procs = [_P("steam", 100_000_000), _P("firefox", 50_000_000)]
+
+    monkeypatch.setattr(psutil, "process_iter",
+                        lambda attrs=None: list(procs))
+    monkeypatch.setattr(psutil, "virtual_memory",
+                        lambda: namedtuple("VM", "total")(1_000_000_000))
+    r = Sampler().sample(MonitorSpec.from_params(
+        {"metric": "procram", "target": "steam"}))
+    assert r.ok and r.pct == pytest.approx(10.0)
+    assert "steam" in r.sub.lower()
+    assert r.text.endswith("%")
+
+
+def test_procram_missing_process_is_na(monkeypatch):
+    psutil = pytest.importorskip("psutil")
+    monkeypatch.setattr(psutil, "process_iter", lambda attrs=None: [])
+    r = Sampler().sample(MonitorSpec.from_params(
+        {"metric": "procram", "target": "no-such-game"}))
+    assert not r.ok and r.text == "n/a"
+
+
+def test_cpupower_warm_up_then_watts(monkeypatch, tmp_path):
+    energy = tmp_path / "energy_uj"
+    energy.write_text("1000000")
+    monkeypatch.setattr(monitors, "_find_rapl_package", lambda: str(energy))
+    times = [100.0, 101.0]
+    monkeypatch.setattr(monitors.time, "monotonic", lambda: times.pop(0))
+    s = Sampler()
+    first = s.sample(MonitorSpec.from_params({"metric": "cpupower"}))
+    assert first.pct is None and first.text == "…"
+    energy.write_text("3000000")  # +2 J over 1 s => 2 W
+    second = s.sample(MonitorSpec.from_params({"metric": "cpupower"}))
+    assert second.ok and second.sample == pytest.approx(2.0)
+    assert second.text.endswith("W")
+
+
+def test_cpupower_without_rapl_is_na(monkeypatch):
+    monkeypatch.setattr(monitors, "_find_rapl_package", lambda: None)
+    r = Sampler().sample(MonitorSpec.from_params({"metric": "cpupower"}))
+    assert not r.ok and r.text == "n/a"
+
+
+def test_gpupower_from_amd_hwmon(monkeypatch, tmp_path):
+    power = tmp_path / "power1_average"
+    power.write_text("45000000")  # 45 W in microwatts
+    monkeypatch.setattr(monitors, "_probe_gpupower",
+                        lambda final=False: ("amdgpu", str(power), "avg"))
+    r = Sampler().sample(MonitorSpec.from_params({"metric": "gpupower"}))
+    assert r.ok and r.sample == pytest.approx(45.0)
+    assert r.text.endswith("W")
+
+
+def test_gpupower_from_nvml(monkeypatch):
+    class _NVML:
+        @staticmethod
+        def nvmlDeviceGetPowerUsage(h):
+            return 72500  # mW
+
+    monkeypatch.setattr(monitors, "_probe_gpupower",
+                        lambda final=False: ("nvml", _NVML, "h0"))
+    r = Sampler().sample(MonitorSpec.from_params({"metric": "gpupower"}))
+    assert r.ok and r.sample == pytest.approx(72.5)
+    assert "72" in r.text or "72.5" in r.text
+
+
+def test_new_metrics_render_without_crashing():
+    for metric, reading in (
+        ("procram", Reading(12.0, "12%", "game", sample=12.0)),
+        ("cpupower", Reading(18.0, "18 W", "package", sample=18.0)),
+        ("gpupower", Reading(45.0, "45 W", "GPU", sample=45.0)),
+    ):
+        spec = MonitorSpec.from_params({"metric": metric, "style": "number"})
+        img = render_monitor(96, spec, reading, [reading.sample])
+        assert isinstance(img, Image.Image)
+        assert img.size == (96, 96)
+
+
+# ---------------------------------------------------------------------------
+# Twitch viewers / uptime
+# ---------------------------------------------------------------------------
+def test_action_catalog_lists_twitch_metrics():
+    choice = ACTION_TYPES["monitor"]["params"][0][1]
+    for metric in ("twitchviewers", "twitchuptime"):
+        assert metric in choice, metric
+        assert metric in monitors.METRICS
+
+
+def test_twitch_fmt_helpers():
+    from fifine_deck import twitch
+    assert twitch.fmt_viewers(42) == "42"
+    assert twitch.fmt_viewers(1500) == "1.5k"
+    assert twitch.fmt_viewers(1000) == "1k"
+    assert twitch.fmt_viewers(2_500_000) == "2.5M"
+    assert twitch.fmt_uptime(65) == "1m 05s"
+    assert twitch.fmt_uptime(3723) == "1h 02m"
+
+
+def test_twitch_viewers_requires_channel():
+    r = Sampler().sample(MonitorSpec.from_params({"metric": "twitchviewers"}))
+    assert not r.ok and r.text == "n/a"
+    assert "channel" in r.sub
+
+
+def test_twitch_viewers_live_and_offline(monkeypatch):
+    from fifine_deck import twitch
+
+    live = twitch.StreamInfo(
+        live=True, login="demo", viewer_count=1234,
+        started_at="2026-01-01T00:00:00Z", game_name="Art")
+    offline = twitch.StreamInfo(live=False, login="demo")
+
+    monkeypatch.setattr(twitch, "get_stream", lambda login: live)
+    r = Sampler().sample(MonitorSpec.from_params(
+        {"metric": "twitchviewers", "target": "demo"}))
+    assert r.ok and r.text == "1.2k"
+    assert r.sample == 1234
+    assert "Art" in r.sub
+
+    monkeypatch.setattr(twitch, "get_stream", lambda login: offline)
+    r = Sampler().sample(MonitorSpec.from_params(
+        {"metric": "twitchviewers", "target": "demo"}))
+    assert r.ok and r.text == "offline"
+    assert r.sample == 0.0
+
+
+def test_twitch_uptime_live(monkeypatch):
+    from fifine_deck import twitch
+    from datetime import datetime, timezone, timedelta
+
+    started = (datetime.now(timezone.utc) - timedelta(hours=1, minutes=5)
+               ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    live = twitch.StreamInfo(
+        live=True, login="demo", viewer_count=10, started_at=started)
+    monkeypatch.setattr(twitch, "get_stream", lambda login: live)
+    r = Sampler().sample(MonitorSpec.from_params(
+        {"metric": "twitchuptime", "target": "demo"}))
+    assert r.ok and "1h" in r.text
+    assert r.sample is not None and r.sample >= 3600
+
+
+def test_twitch_missing_creds_is_na(monkeypatch):
+    from fifine_deck import twitch
+    monkeypatch.setattr(twitch, "get_stream", lambda login: None)
+    r = Sampler().sample(MonitorSpec.from_params(
+        {"metric": "twitchuptime", "target": "demo"}))
+    assert not r.ok and r.text == "n/a"
+
+
+def test_twitch_config_round_trips_client_id(tmp_path):
+    from fifine_deck.model import DeckConfig
+    cfg = DeckConfig(twitch_client_id="abc123",
+                     twitch_client_secret="s3cret")
+    path = tmp_path / "cfg.json"
+    cfg.save(str(path))
+    loaded = DeckConfig.load(str(path))
+    assert loaded.twitch_client_id == "abc123"
+    assert loaded.twitch_client_secret == "s3cret"
+    assert loaded.twitch_secret_id == ""
+
+
+def test_iter_config_secret_ids_includes_twitch():
+    from fifine_deck.model import DeckConfig, iter_config_secret_ids
+    cfg = DeckConfig(obs_secret_id="obs-1", twitch_secret_id="tw-1")
+    assert set(iter_config_secret_ids(cfg)) >= {"obs-1", "tw-1"}
