@@ -53,6 +53,9 @@ def _protect_wheel(widget, filt: QObject):
 # the "switch profile" action (avoids a widgets -> main_window import cycle).
 PROFILES_PROVIDER: Callable[[], object] | None = None
 
+# Injected by the main window: (host, port, password) for live OBS combos.
+OBS_CONN_PROVIDER: Callable[[], tuple] | None = None
+
 # Injected by the main window: renders a monitor key's preview from the
 # controller's sampler (last reading + history), so grid previews show real
 # values even with no device connected and never regress to the placeholder
@@ -622,12 +625,264 @@ class ActionParamsWidget(QWidget):
                 self._params[key] = w
                 form.addRow(label, row)
                 continue
+            elif kind in ("obs_scene", "obs_input", "obs_source"):
+                row = QWidget()
+                hl = QHBoxLayout(row)
+                hl.setContentsMargins(0, 0, 0, 0)
+                w = _protect_wheel(QComboBox(), self._nowheel)
+                w.setEditable(True)
+                w.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+                w.setProperty("kind", kind)
+                cur = str(values.get(key, "") or "")
+                # Ensure websocket is up, resolve placeholders (Mic/Aux → real
+                # mic), and fill the combo from live OBS names.
+                cur = self._resolve_obs_field(kind, cur, values)
+                names = self._fetch_obs_names(kind, values)
+                # Keep resolved name in the list even if matching lagged.
+                if cur and cur not in names:
+                    names = [cur] + names
+                for n in names:
+                    w.addItem(n)
+                if cur:
+                    j = w.findText(cur)
+                    if j >= 0:
+                        w.setCurrentIndex(j)
+                    else:
+                        w.setEditText(cur)
+                elif names:
+                    # Connected with no stored value — pick the first live
+                    # name so mute/scene/source chips are one click to save.
+                    w.setCurrentIndex(0)
+                else:
+                    w.setEditText("")
+                    w.setPlaceholderText("OBS offline — type a name")
+                w.currentTextChanged.connect(self._emit)
+                if kind == "obs_scene":
+                    w.currentTextChanged.connect(self._refresh_obs_source_combo)
+                refresh = QPushButton("↻")
+                refresh.setFixedWidth(28)
+                refresh.setToolTip("Refresh names from OBS")
+                refresh.clicked.connect(
+                    lambda _=False, combo=w, k=kind: self._reload_obs_combo(
+                        combo, k))
+                hl.addWidget(w, 1)
+                hl.addWidget(refresh)
+                self._params[key] = w
+                form.addRow(label, row)
+                continue
             else:
                 w = QLineEdit(str(values.get(key, ""))); w.textChanged.connect(self._emit)
             self._params[key] = w
             form.addRow(label, w)
+        # OBS status + one-shot detect for scene/input/source chips.
+        if atype in ("obs_scene", "obs_preview_scene", "obs_source", "obs_mute"):
+            self._add_obs_detect_row(form, atype, values)
         holder = QWidget(); holder.setLayout(form)
         self._params_box.addWidget(holder)
+
+    def _obs_conn(self) -> tuple | None:
+        provider = globals().get("OBS_CONN_PROVIDER")
+        if not provider:
+            return None
+        try:
+            host, port, password = provider()
+            return host, int(port), password or ""
+        except Exception as e:  # noqa: BLE001
+            log.debug("OBS connection provider failed: %s", e)
+            return None
+
+    def _ensure_obs(self) -> tuple | None:
+        """Bring up the cached OBS session, then return (host, port, password)."""
+        conn = self._obs_conn()
+        if conn is None:
+            return None
+        host, port, password = conn
+        try:
+            from .. import obs_ws
+            obs_ws.ensure(host, port, password)
+        except Exception:  # noqa: BLE001
+            pass
+        return host, port, password
+
+    def _resolve_obs_field(self, kind: str, wanted: str,
+                           values: dict | None = None) -> str:
+        """Rewrite Mic/Aux / BRB / etc. to live OBS names when connected."""
+        conn = self._ensure_obs()
+        if conn is None:
+            return wanted or ""
+        host, port, password = conn
+        values = values or {}
+        scene = str(values.get("scene", "") or "").strip()
+        sw = self._params.get("scene")
+        if isinstance(sw, QComboBox) and sw.currentText().strip():
+            scene = sw.currentText().strip()
+        try:
+            from .. import actions as _actions
+            return _actions.resolve_obs_editor_field(
+                kind, wanted, host, port, password, scene=scene)
+        except Exception as e:  # noqa: BLE001
+            log.debug("OBS field resolve failed: %s", e)
+            return wanted or ""
+
+    def _fetch_obs_names(self, kind: str, values: dict | None = None) -> list[str]:
+        """Live OBS scene / input / source names for editable combos."""
+        conn = self._ensure_obs()
+        if conn is None:
+            return []
+        host, port, password = conn
+        values = values or {}
+        try:
+            from .. import actions as _actions
+            if kind == "obs_scene":
+                return _actions.list_obs_scenes(host, port, password)
+            if kind == "obs_input":
+                return _actions.list_obs_inputs(host, port, password)
+            if kind == "obs_source":
+                scene = str(values.get("scene", "") or "").strip()
+                sw = self._params.get("scene")
+                if isinstance(sw, QComboBox) and sw.currentText().strip():
+                    scene = sw.currentText().strip()
+                names = _actions.list_obs_scene_sources(
+                    host, port, password, scene)
+                # Scene blank or unknown — still offer every source so the
+                # chip can be wired without hunting scene names first.
+                if not names:
+                    names = _actions.list_obs_all_sources(
+                        host, port, password)
+                return names
+        except Exception as e:  # noqa: BLE001
+            log.debug("OBS name fetch failed: %s", e)
+        return []
+
+    def _add_obs_detect_row(self, form: QFormLayout, atype: str,
+                            values: dict) -> None:
+        """Status line + Detect button under OBS scene/input/source fields."""
+        row = QWidget()
+        hl = QHBoxLayout(row)
+        hl.setContentsMargins(0, 0, 0, 0)
+        status = QLabel("")
+        status.setWordWrap(True)
+        status.setStyleSheet("color:#9a9a9a;")
+        conn = self._ensure_obs()
+        if conn is None:
+            status.setText("OBS not configured — Options → OBS settings…")
+        else:
+            try:
+                from .. import actions as _actions
+                ok, msg = _actions.obs_connection_summary(*conn)
+                status.setText(msg)
+                status.setStyleSheet(
+                    "color:#6dce8a;" if ok else "color:#c9a227;")
+            except Exception:  # noqa: BLE001
+                status.setText("OBS status unavailable")
+        detect = QPushButton("Detect")
+        detect.setToolTip(
+            "Pull scene / input / source names from the live OBS websocket "
+            "and fill these fields")
+        detect.clicked.connect(self._detect_obs_fields)
+        hl.addWidget(status, 1)
+        hl.addWidget(detect)
+        form.addRow(row)
+        self._obs_status_label = status
+
+    def _detect_obs_fields(self) -> None:
+        """Fill every OBS combo from the live websocket (Detect button)."""
+        conn = self._ensure_obs()
+        if conn is None:
+            return
+        host, port, password = conn
+        atype = self.type_combo.currentData()
+        try:
+            from .. import actions as _actions
+            params = self._collect(peek=True)
+            filled = _actions.autofill_obs_params(
+                atype, params, host, port, password)
+            # Blank fields: still pick a sensible live default.
+            if atype in ("obs_scene", "obs_preview_scene"):
+                if not str(filled.get("scene", "")).strip():
+                    scenes = _actions.list_obs_scenes(host, port, password)
+                    if scenes:
+                        filled["scene"] = scenes[0]
+            elif atype == "obs_mute":
+                if not str(filled.get("input", "")).strip():
+                    filled["input"] = _actions.resolve_obs_editor_field(
+                        "obs_input", "", host, port, password)
+            elif atype == "obs_source":
+                if not str(filled.get("scene", "")).strip():
+                    cur = _actions.list_obs_current_scene(
+                        host, port, password)
+                    if cur:
+                        filled["scene"] = cur
+                scene = str(filled.get("scene", "") or "")
+                if not str(filled.get("source", "")).strip():
+                    filled["source"] = _actions.resolve_obs_editor_field(
+                        "obs_source", "", host, port, password, scene=scene)
+            ok, msg = _actions.obs_connection_summary(host, port, password)
+            label = getattr(self, "_obs_status_label", None)
+            if isinstance(label, QLabel):
+                label.setText(msg + " — fields updated")
+                label.setStyleSheet(
+                    "color:#6dce8a;" if ok else "color:#c9a227;")
+        except Exception as e:  # noqa: BLE001
+            log.warning("OBS detect failed: %s", e)
+            return
+        # Rebuild widgets from the filled params (keeps type + other fields).
+        self._building = True
+        try:
+            self._build(atype, filled)
+        finally:
+            self._building = False
+        self._emit()
+
+    def _reload_obs_combo(self, combo: QComboBox, kind: str) -> None:
+        """Refresh button: re-query OBS and restore the current text if possible."""
+        cur = self._resolve_obs_field(kind, combo.currentText())
+        names = self._fetch_obs_names(kind)
+        if cur and cur not in names:
+            names = [cur] + names
+        combo.blockSignals(True)
+        combo.clear()
+        for n in names:
+            combo.addItem(n)
+        if cur:
+            j = combo.findText(cur)
+            if j >= 0:
+                combo.setCurrentIndex(j)
+            else:
+                combo.setEditText(cur)
+        elif names:
+            combo.setCurrentIndex(0)
+        else:
+            combo.setPlaceholderText("OBS offline — type a name")
+        combo.blockSignals(False)
+        self._emit()
+        if kind == "obs_scene":
+            self._refresh_obs_source_combo()
+
+    def _refresh_obs_source_combo(self, *_):
+        """When the scene field changes, reload sources for that scene."""
+        source_w = self._params.get("source")
+        if not isinstance(source_w, QComboBox):
+            return
+        if source_w.property("kind") != "obs_source":
+            return
+        cur = self._resolve_obs_field("obs_source", source_w.currentText())
+        names = self._fetch_obs_names("obs_source")
+        if cur and cur not in names:
+            names = [cur] + names
+        source_w.blockSignals(True)
+        source_w.clear()
+        for n in names:
+            source_w.addItem(n)
+        if cur:
+            j = source_w.findText(cur)
+            if j >= 0:
+                source_w.setCurrentIndex(j)
+            else:
+                source_w.setEditText(cur)
+        elif names:
+            source_w.setCurrentIndex(0)
+        source_w.blockSignals(False)
 
     def _collect(self, peek: bool = False):
         if self._multi_editor is not None:
@@ -983,6 +1238,7 @@ class ActionEditor(QWidget):
 
     def set_key(self, kc: KeyConfig, index: int):
         self._building = True
+        self._obs_resolved_pending = False
         try:
             self._set_key(kc, index)
         finally:
@@ -991,6 +1247,11 @@ class ActionEditor(QWidget):
             # early on _building, so every later edit to that key was silently
             # swallowed — the grid and the panel both claiming it was selected.
             self._building = False
+            # Persist OBS auto-resolved scene/input/source names after the
+            # editor is live (emit while _building would be ignored).
+            if getattr(self, "_obs_resolved_pending", False):
+                self._obs_resolved_pending = False
+                self.changed.emit()
 
     def _set_key(self, kc: KeyConfig, index: int):
         self._kc = kc
@@ -1012,6 +1273,16 @@ class ActionEditor(QWidget):
         # otherwise write the keyring / pop the cleartext warning).
         self._last_action = self.params.get_action(peek=True)
         self._last_action_sig = self._action_sig(self._last_action)
+        # OBS combos resolve Mic/Aux → real input (etc.) while building. Keep
+        # that live name on the key so Setup shows what will actually fire.
+        if (self._last_action.type in (
+                "obs_scene", "obs_preview_scene", "obs_source", "obs_mute")
+                and self._last_action.params != dict(kc.action.params)):
+            kc.action = Action(self._last_action.type,
+                               dict(self._last_action.params))
+            self._obs_resolved_pending = True
+        else:
+            self._obs_resolved_pending = False
 
     @staticmethod
     def _action_sig(action: Action) -> tuple:
