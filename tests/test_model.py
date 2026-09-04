@@ -472,18 +472,23 @@ def test_a_second_corruption_keeps_the_first_corpse(tmp_path):
     cfg.active_profile().name = "THE REAL ONE"
     cfg.save(path)
     # a realistic corruption: a truncated write, so the file still HOLDS the
-    # user's work — that is what makes the .corrupt copy worth keeping
+    # user's work — that is what makes the .corrupt copy worth keeping.
+    # Keep most of the file (not half): a minimal config's midpoint can fall
+    # inside the profile name once window/Twitch fields grow the JSON.
     with open(path) as f:
         good = f.read()
+    assert "THE REAL ONE" in good
+    cut = max(good.index("THE REAL ONE") + len("THE REAL ONE"),
+              int(len(good) * 0.85))
     with open(path, "w") as f:
-        f.write(good[:len(good) // 2])
+        f.write(good[:cut])
     DeckConfig.load(path)                      # -> .corrupt, blank config saved
 
     # second event, on the blank config the recovery just wrote
     with open(path) as f:
         blank = f.read()
     with open(path, "w") as f:
-        f.write(blank[:len(blank) // 2])
+        f.write(blank[:max(1, len(blank) // 2)])
     DeckConfig.load(path)
 
     names = []
@@ -716,6 +721,30 @@ def test_show_tray_round_trips():
     assert DeckConfig.from_dict(c.to_dict()).show_tray is False
     d = c.to_dict(); del d["show_tray"]
     assert DeckConfig.from_dict(d).show_tray is True
+
+
+def test_window_geometry_round_trips():
+    c = DeckConfig()
+    assert c.window_pos_saved is False
+    assert c.window_w == 1000 and c.window_h == 620
+    c.window_pos_saved = True
+    c.window_x = -120
+    c.window_y = 40
+    c.window_w = 1280
+    c.window_h = 800
+    c.window_maximized = True
+    back = DeckConfig.from_dict(c.to_dict())
+    assert back.window_pos_saved is True
+    assert back.window_x == -120
+    assert back.window_y == 40
+    assert back.window_w == 1280
+    assert back.window_h == 800
+    assert back.window_maximized is True
+    # Missing fields keep defaults; tiny sizes clamp up.
+    d = {"profiles": [{"name": "P", "pages": [{"name": "Main"}]}],
+         "window_w": 10, "window_h": 10}
+    tiny = DeckConfig.from_dict(d)
+    assert tiny.window_w >= 400 and tiny.window_h >= 300
 
 
 def _cfg_with_action(action):
