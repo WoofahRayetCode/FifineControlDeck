@@ -68,9 +68,17 @@ def _back_key() -> KeyConfig:
     )
 
 
-# Fixed slots for page navigation (15-key deck: clips 1–12, nav 13–14, Back 15).
+# Fixed slots for page navigation on a 15-key deck.
+# Root pages: Prev on 13, Next on 15 (bottom-right). Slot 14 stays free.
+# Folder pages: Next on 14, Back on 15 (Prev is never used — Back covers it).
 PAGE_NAV_PREV_SLOT = 13
-PAGE_NAV_NEXT_SLOT = 14
+PAGE_NAV_NEXT_SLOT_FOLDER = 14
+
+
+def _page_nav_next_slot(*, in_folder: bool) -> int:
+    if in_folder:
+        return PAGE_NAV_NEXT_SLOT_FOLDER
+    return int(DEVICE_PROFILE.get("key_count", 15) or 15)
 
 
 def _page_nav_key(kind: str) -> KeyConfig:
@@ -90,16 +98,17 @@ def _is_page_nav_slot(kc: KeyConfig | None, kind: str) -> bool:
 def apply_page_nav_keys(pages: list[Page], *, in_folder: bool = False) -> None:
     """Place page-nav chips by position.
 
-    Profile (root) pages: first gets Next, last gets Prev, middle get both.
-    Folder pages: only Next on non-last pages — never Prev. The folder's Back
-    key is smart (previous page, or exit on page 1), so a separate Prev would
-    double up with Back. Single-page boards get neither.
+    Profile (root) pages: first gets Next (bottom-right), last gets Prev,
+    middle get both. Folder pages: only Next on non-last pages (slot 14) —
+    never Prev. The folder's Back key is smart (previous page, or exit on
+    page 1), so a separate Prev would double up with Back. Single-page
+    boards get neither.
 
     Only empty slots or slots that already hold the matching nav action are
-    written; other user keys on 13/14 are left alone. Leftover folder Prev
-    chips are cleared when ``in_folder`` is True.
+    written; other user keys on those slots are left alone.
     """
     n = len(pages)
+    next_slot = _page_nav_next_slot(in_folder=in_folder)
     for i, page in enumerate(pages):
         if in_folder:
             want_prev = False
@@ -108,7 +117,27 @@ def apply_page_nav_keys(pages: list[Page], *, in_folder: bool = False) -> None:
             want_prev = n > 1 and i > 0
             want_next = n > 1 and i < n - 1
         _apply_nav_slot(page, PAGE_NAV_PREV_SLOT, "prev", want_prev)
-        _apply_nav_slot(page, PAGE_NAV_NEXT_SLOT, "next", want_next)
+        _apply_nav_slot(page, next_slot, "next", want_next)
+        # Drop a Next left on the other nav column after we moved the
+        # canonical slot (root 14→15, or an old stray).
+        _clear_stray_next(page, next_slot, want_next=want_next)
+
+
+def _clear_stray_next(page: Page, next_slot: int, *, want_next: bool) -> None:
+    last = int(DEVICE_PROFILE.get("key_count", 15) or 15)
+    for slot in (PAGE_NAV_NEXT_SLOT_FOLDER, last):
+        if slot == next_slot:
+            continue
+        kc = page.keys.get(slot)
+        if kc is None or kc.is_empty() or kc.folder is not None:
+            continue
+        if kc.action.type != "next_page":
+            continue
+        # Clear when we don't want Next, or when the canonical slot already
+        # holds Next (duplicate).
+        can = page.keys.get(next_slot)
+        if not want_next or (can is not None and can.action.type == "next_page"):
+            page.keys[slot] = KeyConfig()
 
 
 def _apply_nav_slot(page: Page, slot: int, kind: str, want: bool) -> None:
