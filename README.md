@@ -129,6 +129,13 @@ expectations:
   clips) onto a folder to move them inside, double-click it in the editor to go
   in (a **Back** key returns); folders can nest and have their own pages.
   Right-click a folder key → **Move to page** to relocate it to another page.
+  Right-click any key → **Delete** to wipe it (same as **Clear key** in the
+  editor; folders still confirm first). On multi-page boards (profile pages
+  and folders), **Prev** / **Next** chips are placed by position automatically
+  (first page gets Next, last gets Prev, middle pages get both on keys 13/14);
+  custom keys already on those slots are kept. Inside a multi-page folder only
+  **Next** is auto-placed — **Back** steps to the previous page and exits the
+  folder from page 1 (Stream Deck–style).
 - Three-pane configuration GUI (actions catalog · live device grid · key
   settings) with a dark theme matching the original; system tray when the
   session exposes a StatusNotifier host.
@@ -156,6 +163,8 @@ Optional, for specific actions (install what you use):
 | NVIDIA VRAM key   | `python3-pynvml` (AMD needs nothing — sysfs)     |
 | OBS Studio        | OBS 28+ with WebSocket server enabled (port 4455)|
 | Play sound        | `pw-play` / `paplay`, or `ffplay` / `mpv`        |
+| Twitch monitors   | Client-ID + Client Secret (Options → Twitch…)    |
+| Create clip       | Chatterino open on a channel + a keystroke tool  |
 
 The status bar shows what was detected on your session.
 
@@ -246,11 +255,16 @@ fifine-control-deck`.
 
    or `python3 -m fifine_deck`. Use `--headless` for the daemon-only mode.
 
-## Icons
+## Icons and bundled sounds
 
 The app ships a built-in icon library (`assets/icons/library/`) — pick icons in
 the key editor via **Library…**, or load your own image with **File…**. Icons
 are regenerated with `python3 tools/make_icons.py`.
+
+Bundled soundboard clips live in `assets/sounds/` (indexed by
+`assets/sounds/index.json`). Each clip has a fetch/convert helper under
+`tools/make_*.py` (MyInstants → 22050 Hz mono WAV). Third-party sound
+attribution and takedown notes are in [`NOTICE`](NOTICE).
 
 ## Autostart on login
 
@@ -297,10 +311,21 @@ fifine_deck/
   actions.py            action engine + Linux environment detection
   rendering.py          key-image rendering (device + GUI preview)
   controller.py         runtime: device <-> config <-> actions, hotplug
+  monitors.py           system / Twitch monitor key sampling + faces
+  sounds.py             bundled clips + PipeWire/Pulse playback routing
+  obs_ws.py             obs-websocket v5 client (stdlib only)
+  twitch.py             Twitch Helix helpers (viewers / uptime)
+  secret_store.py       OS keyring helper for OBS / Twitch secrets
+  starter_layout.py     brand-new config folders (OBS, Memes, …)
   gui/                  PyQt6 GUI (grid, editor, profiles, pages, tray)
   app.py                entry point (GUI / --headless)
+assets/
+  icons/library/        built-in key icons
+  sounds/               soundboard WAVs + index.json
+tools/                  make_icons.py, make_<clip>.py fetchers, e2e_live.py
+NOTICE                  third-party device SDK + sound attribution
 probe_device.py         one-off hardware profiler
-packaging/              udev rule, installer, systemd unit
+packaging/              udev rule, AppImage/deb builders, systemd unit
 ```
 
 ## Licensing
