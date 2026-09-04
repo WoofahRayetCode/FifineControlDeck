@@ -28,6 +28,8 @@ class Ctx:
     def goto_page(self, index): self.calls.append(("goto_page", index))
     def next_page(self): self.calls.append(("next_page",))
     def prev_page(self): self.calls.append(("prev_page",))
+    def show_twitch_chat(self, channel=""): self.calls.append(
+        ("show_twitch_chat", channel))
     def set_brightness(self, percent): self.calls.append(("set_brightness", percent))
     def adjust_brightness(self, delta): self.calls.append(("adjust_brightness", delta))
     def sleep_screen(self): self.calls.append(("sleep_screen",))
@@ -52,7 +54,7 @@ def rec(monkeypatch):
 
     for name in ("_popen_detached", "_send_hotkey", "_type_text",
                  "_media", "_volume", "_close_app", "_play_sound",
-                 "_chatterino_command",
+                 "_chatterino_command", "_power_profile", "_system_power",
                  "_obs_scene", "_obs_transition", "_obs_source",
                  "_obs_output", "_obs_mute"):
         monkeypatch.setattr(actions, name, recorder(name))
@@ -247,6 +249,27 @@ def test_goto_page_converts_to_zero_based():
     assert ctx.calls == [("goto_page", 2)]
 
 
+def test_show_twitch_chat_dispatches_to_context():
+    ctx = Ctx()
+    actions.execute(Action("show_twitch_chat", {"channel": "Shroud"}), ctx)
+    actions.execute(Action("show_twitch_chat", {}), ctx)
+    assert ctx.calls == [
+        ("show_twitch_chat", "Shroud"),
+        ("show_twitch_chat", ""),
+    ]
+
+
+def test_twitch_snooze_ad_dispatches(monkeypatch):
+    seen = {"n": 0}
+
+    def fake():
+        seen["n"] += 1
+
+    monkeypatch.setattr(actions, "_twitch_snooze_ad", fake)
+    actions.execute(Action("twitch_snooze_ad", {}))
+    assert seen["n"] == 1
+
+
 def test_brightness_modes():
     ctx = Ctx()
     actions.execute(Action("brightness", {"mode": "set", "value": "40"}), ctx)
@@ -255,6 +278,60 @@ def test_brightness_modes():
     assert ctx.calls == [("set_brightness", 40),
                          ("adjust_brightness", 10),
                          ("adjust_brightness", -10)]
+
+
+def test_power_profile_dispatches(rec):
+    actions.execute(Action("power_profile", {"profile": "performance"}))
+    actions.execute(Action("power_profile", {"profile": "cycle"}))
+    assert ("_power_profile", ("performance",), {}) in rec
+    assert ("_power_profile", ("cycle",), {}) in rec
+
+
+def test_system_power_dispatches(rec):
+    actions.execute(Action("system_power", {"cmd": "sleep"}))
+    actions.execute(Action("system_power", {"cmd": "hibernate"}))
+    actions.execute(Action("system_power", {"cmd": "shutdown"}))
+    assert ("_system_power", ("sleep",), {}) in rec
+    assert ("_system_power", ("hibernate",), {}) in rec
+    assert ("_system_power", ("shutdown",), {}) in rec
+
+
+def test_system_power_prefers_loginctl(monkeypatch):
+    calls = []
+
+    class Result:
+        returncode = 0
+        stderr = b""
+
+    def fake_run(argv, **kw):
+        calls.append(list(argv))
+        return Result()
+
+    monkeypatch.setattr(actions, "_has",
+                        lambda cmd: cmd in ("loginctl", "systemctl"))
+    monkeypatch.setattr(actions.subprocess, "run", fake_run)
+    actions._system_power("sleep")
+    actions._system_power("hibernate")
+    actions._system_power("shutdown")
+    assert calls == [
+        ["loginctl", "suspend"],
+        ["loginctl", "hibernate"],
+        ["loginctl", "poweroff"],
+    ]
+
+
+def test_power_profile_set_and_cycle(monkeypatch):
+    calls = []
+    monkeypatch.setattr(actions, "_power_profiles_available",
+                        lambda: ["power-saver", "balanced", "performance"])
+    monkeypatch.setattr(actions, "_power_profile_get", lambda: "balanced")
+    monkeypatch.setattr(
+        actions, "_power_profile_set",
+        lambda p: calls.append(p) or True)
+    actions._power_profile("performance")
+    actions._power_profile("cycle")
+    actions._power_profile("eco")
+    assert calls == ["performance", "performance", "power-saver"]
 
 
 def test_brightness_direction_wins_over_sign():
@@ -676,6 +753,8 @@ def test_obs_source_toggle_fetches_id_and_state(monkeypatch):
         calls.append((req, data))
         if req == "GetSceneList":
             return {"scenes": [{"sceneName": "Main"}]}
+        if req == "GetSceneItemList":
+            return {"sceneItems": [{"sourceName": "Cam"}]}
         if req == "GetSceneItemId":
             return {"sceneItemId": 7}
         if req == "GetSceneItemEnabled":
@@ -686,11 +765,155 @@ def test_obs_source_toggle_fetches_id_and_state(monkeypatch):
     actions._obs_source(Ctx(), "Main", "Cam", "toggle")
     assert calls == [
         ("GetSceneList", None),
+        ("GetSceneItemList", {"sceneName": "Main"}),
         ("GetSceneItemId", {"sceneName": "Main", "sourceName": "Cam"}),
         ("GetSceneItemEnabled", {"sceneName": "Main", "sceneItemId": 7}),
         ("SetSceneItemEnabled",
          {"sceneName": "Main", "sceneItemId": 7, "sceneItemEnabled": False}),
     ]
+
+
+def test_obs_source_resolves_brb_alias(monkeypatch):
+    calls = []
+
+    def fake_call(host, port, password, req, data=None):
+        calls.append((req, data))
+        if req == "GetSceneList":
+            return {"scenes": [{"sceneName": "Live"},
+                               {"sceneName": "Be Right Back"}]}
+        if req == "GetSceneItemList":
+            scene = (data or {}).get("sceneName")
+            if scene == "Live":
+                return {"sceneItems": [{"sourceName": "Webcam"},
+                                       {"sourceName": "Be Right Back"}]}
+            return {"sceneItems": []}
+        if req == "GetSceneItemId":
+            return {"sceneItemId": 3}
+        return {}
+
+    monkeypatch.setattr("fifine_deck.obs_ws.call", fake_call)
+    actions._obs_source(Ctx(), "Live", "BRB", "show")
+    assert ("GetSceneItemId",
+            {"sceneName": "Live", "sourceName": "Be Right Back"}) in calls
+    assert ("SetSceneItemEnabled",
+            {"sceneName": "Live", "sceneItemId": 3,
+             "sceneItemEnabled": True}) in calls
+
+
+def test_obs_source_scans_other_scenes_for_brb(monkeypatch):
+    calls = []
+
+    def fake_call(host, port, password, req, data=None):
+        calls.append((req, data))
+        if req == "GetSceneList":
+            return {"scenes": [{"sceneName": "Live"},
+                               {"sceneName": "Main"}]}
+        if req == "GetSceneItemList":
+            scene = (data or {}).get("sceneName")
+            if scene == "Live":
+                return {"sceneItems": [{"sourceName": "Webcam"}]}
+            if scene == "Main":
+                return {"sceneItems": [{"sourceName": "BRB Overlay"}]}
+            return {"sceneItems": []}
+        if req == "GetSceneItemId":
+            return {"sceneItemId": 9}
+        return {}
+
+    monkeypatch.setattr("fifine_deck.obs_ws.call", fake_call)
+    actions._obs_source(Ctx(), "Live", "BRB", "hide")
+    assert ("GetSceneItemId",
+            {"sceneName": "Main", "sourceName": "BRB Overlay"}) in calls
+
+
+def test_obs_mute_prefers_special_mic(monkeypatch):
+    calls = []
+
+    def fake_call(host, port, password, req, data=None):
+        calls.append((req, data))
+        if req == "GetSpecialInputs":
+            return {"mic1": "Fifine USB Mic", "desktop1": "Desktop Audio"}
+        if req == "GetInputList":
+            return {"inputs": [
+                {"inputName": "Desktop Audio", "inputKind": "pulse_output_capture"},
+                {"inputName": "Fifine USB Mic", "inputKind": "pulse_input_capture"},
+            ]}
+        return {}
+
+    monkeypatch.setattr("fifine_deck.obs_ws.call", fake_call)
+    actions._obs_mute(Ctx(), "Mic/Aux", "toggle")
+    assert ("ToggleInputMute", {"inputName": "Fifine USB Mic"}) in calls
+
+
+def test_autofill_obs_params_rewrites_chip_names(monkeypatch):
+    def fake_call(host, port, password, req, data=None):
+        if req == "GetSceneList":
+            return {"scenes": [{"sceneName": "Be Right Back"},
+                               {"sceneName": "Main Live"}],
+                    "currentProgramSceneName": "Main Live"}
+        if req == "GetCurrentProgramScene":
+            return {"currentProgramSceneName": "Main Live"}
+        if req == "GetSpecialInputs":
+            return {"mic1": "USB Mic"}
+        if req == "GetInputList":
+            return {"inputs": [
+                {"inputName": "USB Mic", "inputKind": "pulse_input_capture"},
+            ]}
+        if req == "GetSceneItemList":
+            return {"sceneItems": [{"sourceName": "BRB Screen"}]}
+        return {}
+
+    monkeypatch.setattr("fifine_deck.obs_ws.call", fake_call)
+    scene = actions.autofill_obs_params(
+        "obs_scene", {"scene": "BRB"}, "127.0.0.1", 4455, "")
+    assert scene["scene"] == "Be Right Back"
+    mute = actions.autofill_obs_params(
+        "obs_mute", {"input": "Mic/Aux", "state": "toggle"},
+        "127.0.0.1", 4455, "")
+    assert mute["input"] == "USB Mic"
+    src = actions.autofill_obs_params(
+        "obs_source",
+        {"scene": "Live", "source": "BRB", "state": "toggle"},
+        "127.0.0.1", 4455, "")
+    assert src["scene"] == "Main Live"
+    assert src["source"] == "BRB Screen"
+
+
+def test_resolve_obs_editor_field_and_current_scene(monkeypatch):
+    def fake_call(host, port, password, req, data=None):
+        if req == "GetSceneList":
+            return {"scenes": [{"sceneName": "Cam"},
+                               {"sceneName": "Main Live"}],
+                    "currentProgramSceneName": "Main Live"}
+        if req == "GetCurrentProgramScene":
+            return {"currentProgramSceneName": "Main Live"}
+        if req == "GetSpecialInputs":
+            return {"mic1": "Fifine"}
+        if req == "GetInputList":
+            return {"inputs": [
+                {"inputName": "Fifine", "inputKind": "pulse_input_capture"},
+                {"inputName": "Desktop", "inputKind": "pulse_output_capture"},
+            ]}
+        if req == "GetSceneItemList":
+            return {"sceneItems": [{"sourceName": "Webcam"},
+                                   {"sourceName": "BRB Overlay"}]}
+        return {}
+
+    monkeypatch.setattr("fifine_deck.obs_ws.call", fake_call)
+    monkeypatch.setattr("fifine_deck.obs_ws.ensure", lambda *a, **k: True)
+    assert actions.list_obs_current_scene("127.0.0.1", 4455, "") == "Main Live"
+    scenes = actions.list_obs_scenes("127.0.0.1", 4455, "")
+    assert scenes[0] == "Main Live"
+    assert actions.resolve_obs_editor_field(
+        "obs_input", "Mic/Aux", "127.0.0.1", 4455, "") == "Fifine"
+    assert actions.resolve_obs_editor_field(
+        "obs_input", "", "127.0.0.1", 4455, "") == "Fifine"
+    assert actions.resolve_obs_editor_field(
+        "obs_source", "BRB", "127.0.0.1", 4455, "",
+        scene="") == "BRB Overlay"
+    sources = actions.list_obs_scene_sources("127.0.0.1", 4455, "", "")
+    assert "Webcam" in sources
+    ok, msg = actions.obs_connection_summary("127.0.0.1", 4455, "")
+    assert ok and "connected" in msg.lower() and "Main Live" in msg
 
 
 def test_play_sound_dispatches(rec):
