@@ -259,6 +259,95 @@ def test_invalidate_drops_cache(monkeypatch):
     assert obs_ws._cached is None
 
 
+def test_ping_keeps_session_cached(monkeypatch):
+    """A successful Test connection must leave the client open for OBS's
+    session table — closing immediately made Fifine invisible there."""
+    obs_ws.invalidate()
+    hello = json.dumps({
+        "op": 0,
+        "d": {
+            "obsStudioVersion": "32.0.0",
+            "obsWebSocketVersion": "5.5.2",
+            "rpcVersion": 1,
+        },
+    })
+    identified = json.dumps({"op": 2, "d": {"negotiatedRpcVersion": 1}})
+    state = {"sock": None}
+
+    def fake_create_connection(addr, timeout=None):
+        sock = FakeSock([])
+        state["sock"] = sock
+        original_sendall = sock.sendall
+
+        def sendall(data):
+            original_sendall(data)
+            if data.startswith(b"GET ") and not sock._inbound:
+                text = data.decode("ascii", "replace")
+                key = None
+                for line in text.split("\r\n"):
+                    if line.lower().startswith("sec-websocket-key:"):
+                        key = line.split(":", 1)[1].strip()
+                accept = obs_ws._ws_accept_key(key)
+                http_ok = (
+                    b"HTTP/1.1 101 Switching Protocols\r\n"
+                    b"Upgrade: websocket\r\n"
+                    b"Connection: Upgrade\r\n"
+                    b"Sec-WebSocket-Accept: " + accept.encode("ascii") + b"\r\n"
+                    b"\r\n"
+                )
+                sock._inbound.append(
+                    http_ok
+                    + _server_frame(hello)
+                    + _server_frame(identified)
+                )
+                return
+            try:
+                payload = _client_frame_payload(data)
+                msg = json.loads(payload.decode("utf-8"))
+            except Exception:
+                return
+            if msg.get("op") == 6:
+                rid = msg["d"]["requestId"]
+                resp = {
+                    "op": 7,
+                    "d": {
+                        "requestType": "GetVersion",
+                        "requestId": rid,
+                        "requestStatus": {"result": True, "code": 100},
+                        "responseData": {
+                            "obsVersion": "32.0.0",
+                            "obsWebSocketVersion": "5.5.2",
+                        },
+                    },
+                }
+                sock._inbound.append(_server_frame(json.dumps(resp)))
+
+        sock.sendall = sendall
+        return sock
+
+    monkeypatch.setattr(obs_ws.socket, "create_connection",
+                        fake_create_connection)
+    ok, msg = obs_ws.ping("127.0.0.1", 4455, "")
+    assert ok
+    assert "32.0.0" in msg
+    assert obs_ws.is_connected()
+    assert state["sock"] is not None
+    assert not state["sock"].closed
+    obs_ws.invalidate()
+    assert not obs_ws.is_connected()
+
+
+def test_ensure_returns_false_when_obs_down(monkeypatch):
+    obs_ws.invalidate()
+
+    def boom(*a, **k):
+        raise ConnectionRefusedError("refused")
+
+    monkeypatch.setattr(obs_ws.socket, "create_connection", boom)
+    assert obs_ws.ensure("127.0.0.1", 4455, "") is False
+    assert not obs_ws.is_connected()
+
+
 def test_parse_ws_url():
     assert obs_ws.parse_ws_url("ws://192.168.1.5:4456") == ("192.168.1.5", 4456)
     assert obs_ws.parse_ws_url("127.0.0.1")[0] == "127.0.0.1"
