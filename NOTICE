@@ -17,11 +17,13 @@ rigor789/mirabox-streamdock-node (MIT) and 4ndv/mirajazz.
 
 Bundled sound effects (assets/sounds/)
 --------------------------------------
-All WAV clips under assets/sounds/ are original, synthesised audio generated
-for this project (cartoon beeps, comedy stingers, fart-like filtered-noise
-bursts, and short parody jingles). They are not sampled from commercial
-libraries. You may use them with the app under the same license as the
-application code.
+All bundled WAV clips are third-party meme sounds sourced from MyInstants
+(redistributed as converted 22050 Hz mono WAV for the Play sound action).
+They are not affiliated with the uploaders, original performers, or rightsholders.
+Each clip lists its Instant URL in the matching tools/make_*.py helper.
+
+If a third-party clip's rights holder objects, remove that WAV from the
+bundle and drop its entry from assets/sounds/index.json.
 
 This project is not affiliated with or endorsed by fifine, Hotspot/Mirabox,
 or Elgato.
