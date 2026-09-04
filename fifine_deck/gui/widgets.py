@@ -19,7 +19,8 @@ from PyQt6.QtWidgets import (
 from typing import Callable
 
 from .. import rendering, assets
-from ..actions import ACTION_TYPES, ACTION_CATALOG
+from ..actions import (ACTION_TYPES, get_action_catalog,
+                       catalog_entry_label, encode_catalog_drag)
 from ..model import KeyConfig, KnobConfig, Action, _folder_loss_summary
 
 log = logging.getLogger(__name__)
@@ -63,6 +64,11 @@ MONITOR_PREVIEW_PROVIDER: Callable[[KeyConfig, int], object] | None = None
 # changed underneath the drag (an action can switch pages mid-drag) is
 # rejected instead of rearranging the wrong page's keys.
 CURRENT_PAGE_ID_PROVIDER: Callable[[], str] | None = None
+
+# Injected by the main window: other pages in the current container that a
+# folder key can be moved to. Returns [(page_index, label), ...] excluding
+# the page currently shown.
+FOLDER_MOVE_PAGES_PROVIDER: Callable[[], list[tuple[int, str]]] | None = None
 
 # One cleartext-fallback warning per app run (see _warn_plaintext_once).
 _PLAINTEXT_WARNED = False
@@ -162,6 +168,8 @@ class KeyButton(QToolButton):
     keyMoved = pyqtSignal(int, int)        # (source_index, target_index) swap
     openFolder = pyqtSignal(int)           # double-click to enter a folder key
     createFolder = pyqtSignal(int)         # context-menu: turn this key into a folder
+    moveFolderToPage = pyqtSignal(int, int)  # (key_index, dest_page_index)
+    deleteKey = pyqtSignal(int)            # context-menu: clear / delete this key
 
     def __init__(self, index: int, size: int = 96):
         super().__init__()
@@ -195,6 +203,30 @@ class KeyButton(QToolButton):
         open_act.setEnabled(is_folder)
         open_act.triggered.connect(lambda: self.openFolder.emit(self.index))
         menu.addAction(open_act)
+        move_menu = menu.addMenu("Move to page")
+        move_menu.setEnabled(False)
+        if is_folder:
+            provider = globals().get("FOLDER_MOVE_PAGES_PROVIDER")
+            targets = provider() if provider else []
+            if targets:
+                move_menu.setEnabled(True)
+                for page_idx, label in targets:
+                    act = QAction(label, self)
+                    act.triggered.connect(
+                        lambda _=False, pi=page_idx:
+                            self.moveFolderToPage.emit(self.index, pi))
+                    move_menu.addAction(act)
+            else:
+                empty = QAction("(no other pages)", self)
+                empty.setEnabled(False)
+                move_menu.addAction(empty)
+                move_menu.setEnabled(True)
+        menu.addSeparator()
+        delete = QAction("Delete", self)
+        # Empty keys have nothing to wipe; keep the item visible but disabled.
+        delete.setEnabled(self._kc is not None and not self._kc.is_empty())
+        delete.triggered.connect(lambda: self.deleteKey.emit(self.index))
+        menu.addAction(delete)
         menu.exec(self.mapToGlobal(pos))
 
     def update_preview(self, kc: KeyConfig):
@@ -266,8 +298,21 @@ class KeyButton(QToolButton):
         md = e.mimeData()
         if md.hasFormat(MIME_ACTION) or md.hasFormat(MIME_KEY):
             e.acceptProposedAction()
-            self.setStyleSheet(
-                "QToolButton{border:2px dashed #409eff;border-radius:10px;background:#12203a;}")
+            # Dropping a key onto a folder moves it inside (Stream Deck–style);
+            # use a distinct green affordance so it doesn't read as a swap.
+            into_folder = (
+                md.hasFormat(MIME_KEY)
+                and self._kc is not None
+                and self._kc.action.type == "open_folder"
+                and self._kc.folder is not None)
+            if into_folder:
+                self.setStyleSheet(
+                    "QToolButton{border:2px dashed #00c853;border-radius:10px;"
+                    "background:#0d2818;}")
+            else:
+                self.setStyleSheet(
+                    "QToolButton{border:2px dashed #409eff;border-radius:10px;"
+                    "background:#12203a;}")
 
     def dragLeaveEvent(self, e):
         self.setStyleSheet(self._base_qss)
@@ -530,7 +575,7 @@ class ActionParamsWidget(QWidget):
                     w.addItem(f"— {cat} —", "")
                     # Non-selectable headers: Qt has no native separator data,
                     # so we keep them selectable but empty data is ignored on
-                    # collect by falling back to previous / bleep.
+                    # collect by falling back to previous / bruh.
                     for c in by_cat[cat]:
                         w.addItem(c["label"], c["name"])
                 w.addItem("— Random —", "")
@@ -539,7 +584,7 @@ class ActionParamsWidget(QWidget):
                 w.addItem("Random fart", "random_fart")
                 w.addItem("Random music", "random_music")
                 w.addItem("Custom file…", "custom")
-                cur = str(values.get(key, "bleep") or "bleep")
+                cur = str(values.get(key, "bruh") or "bruh")
                 j = w.findData(cur)
                 if j >= 0:
                     w.setCurrentIndex(j)
@@ -547,7 +592,7 @@ class ActionParamsWidget(QWidget):
                     w.addItem(cur, cur)
                     w.setCurrentIndex(w.count() - 1)
                 else:
-                    j = w.findData("bleep")
+                    j = w.findData("bruh")
                     if j >= 0:
                         w.setCurrentIndex(j)
                 w.setProperty("kind", "sound")
@@ -620,7 +665,7 @@ class ActionParamsWidget(QWidget):
                     # value rather than wiping the clip to "".
                     if data in (None, "") and w.property("kind") == "sound":
                         out[k] = out.get(k) or self._orig_action.params.get(
-                            k, "bleep")
+                            k, "bruh")
                     else:
                         out[k] = data or ""
                 else:
@@ -1157,34 +1202,36 @@ class ActionCatalog(QListWidget):
             "QListWidget{background:#161616;border:none;}"
             "QListWidget::item{padding:6px 8px;border-radius:6px;margin:1px 4px;}"
             "QListWidget::item:selected{background:#1551ff;}")
-        for cat, types in ACTION_CATALOG:
+        for cat, entries in get_action_catalog():
             header = QListWidgetItem(cat.upper())
             header.setFlags(Qt.ItemFlag.NoItemFlags)
             f = header.font(); f.setBold(True); f.setPointSize(8); header.setFont(f)
             header.setForeground(QColor("#7a7a7a"))
             self.addItem(header)
-            for t in types:
-                label = ACTION_TYPES.get(t, {}).get("label", t)
+            for entry in entries:
+                label = catalog_entry_label(entry)
                 item = QListWidgetItem("   " + label)
-                item.setData(Qt.ItemDataRole.UserRole, t)
+                # Drag token may be "monitor" or "monitor?metric=gpu" — never
+                # contains ':', so the page-id partition in dropEvent stays safe.
+                item.setData(Qt.ItemDataRole.UserRole, encode_catalog_drag(entry))
                 self.addItem(item)
 
     def startDrag(self, actions):
         item = self.currentItem()
         if item is None:
             return
-        atype = item.data(Qt.ItemDataRole.UserRole)
-        if not atype:
+        token = item.data(Qt.ItemDataRole.UserRole)
+        if not token:
             return
         mime = QMimeData()
         # Stamp the page the drag STARTED on, exactly as KeyButton does for a
         # key move, so KeyButton.dropEvent can reject a drop that lands after
-        # the deck switched pages underneath the drag. Action types are plain
-        # identifiers with no colon, so partition() splits this unambiguously.
+        # the deck switched pages underneath the drag. Tokens have no colon
+        # (presets use '?'), so partition() still splits type from page id.
         provider = globals().get("CURRENT_PAGE_ID_PROVIDER")
         page_id = provider() if provider else ""
-        mime.setData(MIME_ACTION, f"{atype}:{page_id}".encode())
-        mime.setText(atype)
+        mime.setData(MIME_ACTION, f"{token}:{page_id}".encode())
+        mime.setText(str(token))
         drag = QDrag(self)
         drag.setMimeData(mime)
         drag.exec(Qt.DropAction.CopyAction)
