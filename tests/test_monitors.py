@@ -7,6 +7,7 @@ The invariants pinned here come straight from issue #2's acceptance criteria:
 - a broken target (bad mount, unknown interface) yields "n/a", never a crash
 """
 from collections import deque, namedtuple
+import time
 
 import pytest
 
@@ -1753,7 +1754,7 @@ def test_new_metrics_render_without_crashing():
 # ---------------------------------------------------------------------------
 def test_action_catalog_lists_twitch_metrics():
     choice = ACTION_TYPES["monitor"]["params"][0][1]
-    for metric in ("twitchviewers", "twitchuptime"):
+    for metric in ("twitchviewers", "twitchuptime", "twitchad"):
         assert metric in choice, metric
         assert metric in monitors.METRICS
 
@@ -1794,6 +1795,36 @@ def test_twitch_viewers_live_and_offline(monkeypatch):
         {"metric": "twitchviewers", "target": "demo"}))
     assert r.ok and r.text == "offline"
     assert r.sample == 0.0
+
+
+def test_twitch_ad_requires_login(monkeypatch):
+    from fifine_deck import twitch
+    monkeypatch.setattr(twitch, "user_login_status", lambda: (False, ""))
+    r = Sampler().sample(MonitorSpec.from_params({"metric": "twitchad"}))
+    assert not r.ok and r.text == "login"
+
+
+def test_twitch_ad_countdown(monkeypatch):
+    from fifine_deck import twitch
+    monkeypatch.setattr(twitch, "user_login_status",
+                        lambda: (True, "streamer"))
+    sched = twitch.AdSchedule(
+        next_ad_at=time.time() + 125, duration=60, snooze_count=2)
+    monkeypatch.setattr(twitch, "get_ad_schedule", lambda: sched)
+    r = Sampler().sample(MonitorSpec.from_params({"metric": "twitchad"}))
+    assert r.ok and r.text in ("2:05", "2:04", "2:06")
+    assert "60s" in r.sub
+
+
+def test_twitch_ad_now(monkeypatch):
+    from fifine_deck import twitch
+    monkeypatch.setattr(twitch, "user_login_status",
+                        lambda: (True, "streamer"))
+    sched = twitch.AdSchedule(
+        next_ad_at=time.time() - 5, duration=90, snooze_count=1)
+    monkeypatch.setattr(twitch, "get_ad_schedule", lambda: sched)
+    r = Sampler().sample(MonitorSpec.from_params({"metric": "twitchad"}))
+    assert r.ok and r.text == "NOW"
 
 
 def test_twitch_uptime_live(monkeypatch):
