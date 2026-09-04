@@ -179,6 +179,15 @@ class KnobConfig:
         )
 
 
+# Page face modes. "keys" is the normal Stream Deck–style grid; "twitch_chat"
+# fills the page with live chat; "photo" spreads one image across every key.
+PAGE_DISPLAY_KEYS = "keys"
+PAGE_DISPLAY_TWITCH_CHAT = "twitch_chat"
+PAGE_DISPLAY_PHOTO = "photo"
+PAGE_DISPLAY_MODES = (
+    PAGE_DISPLAY_KEYS, PAGE_DISPLAY_TWITCH_CHAT, PAGE_DISPLAY_PHOTO)
+
+
 @dataclass
 class Page:
     """A page of key/knob bindings. keys maps a 1-based key index -> KeyConfig."""
@@ -186,6 +195,12 @@ class Page:
     id: str = field(default_factory=_new_id)
     keys: dict[int, KeyConfig] = field(default_factory=dict)
     knobs: dict[int, KnobConfig] = field(default_factory=dict)
+    # What the page shows. Default keeps classic per-key actions/icons.
+    display_mode: str = PAGE_DISPLAY_KEYS
+    # Twitch channel login for display_mode=twitch_chat (no leading #).
+    chat_channel: str = ""
+    # Image path for display_mode=photo (absolute or ~-expanded).
+    photo_path: str = ""
 
     def key(self, index: int) -> KeyConfig:
         if index not in self.keys:
@@ -197,13 +212,32 @@ class Page:
             self.knobs[index] = KnobConfig()
         return self.knobs[index]
 
+    def is_twitch_chat(self) -> bool:
+        return self.display_mode == PAGE_DISPLAY_TWITCH_CHAT
+
+    def is_photo(self) -> bool:
+        return self.display_mode == PAGE_DISPLAY_PHOTO
+
+    def is_special(self) -> bool:
+        """True when the page owns the whole grid (chat / photo), not key actions."""
+        return self.display_mode in (PAGE_DISPLAY_TWITCH_CHAT, PAGE_DISPLAY_PHOTO)
+
     def to_dict(self) -> dict:
-        return {
+        d = {
             "name": self.name,
             "id": self.id,
             "keys": {str(k): v.to_dict() for k, v in self.keys.items()},
             "knobs": {str(k): v.to_dict() for k, v in self.knobs.items()},
         }
+        if self.display_mode and self.display_mode != PAGE_DISPLAY_KEYS:
+            d["display_mode"] = self.display_mode
+        channel = (self.chat_channel or "").strip().lstrip("#").lower()
+        if channel:
+            d["chat_channel"] = channel
+        photo = (self.photo_path or "").strip()
+        if photo:
+            d["photo_path"] = photo
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "Page":
@@ -229,11 +263,19 @@ class Page:
                 knobs[int(k)] = KnobConfig.from_dict(v)
             except (TypeError, ValueError):
                 continue
+        mode = _as_str(d.get("display_mode"), PAGE_DISPLAY_KEYS).strip().lower()
+        if mode not in PAGE_DISPLAY_MODES:
+            mode = PAGE_DISPLAY_KEYS
+        channel = _as_str(d.get("chat_channel"), "").strip().lstrip("#").lower()
+        photo = _as_str(d.get("photo_path"), "").strip()
         return cls(
             name=_as_str(d.get("name"), "Page"),
             id=_as_str(d.get("id"), "") or _new_id(),
             keys=keys,
             knobs=knobs,
+            display_mode=mode,
+            chat_channel=channel,
+            photo_path=photo,
         )
 
 
@@ -298,6 +340,14 @@ class DeckConfig:
     snap_hint_dismissed: bool = False   # user ticked "don't show again" on the snap USB hint
     sleep_with_screen: bool = True   # blank the deck when the screen/monitor blanks
     show_tray: bool = True     # tray icon when a StatusNotifier host is present
+    # Main window placement. window_pos_saved gates x/y so a left-of-primary
+    # monitor (negative coords) is still restoreable; w/h always apply when set.
+    window_pos_saved: bool = False
+    window_x: int = 0
+    window_y: int = 0
+    window_w: int = 1000
+    window_h: int = 620
+    window_maximized: bool = False
     # Soundboard playback sink (Options → Soundboard audio). Empty = system
     # default. When set, clips play to that PipeWire/Pulse sink so OBS can
     # capture them; sound_also_default dual-plays to headphones as well.
@@ -316,6 +366,12 @@ class DeckConfig:
     twitch_client_id: str = ""
     twitch_secret_id: str = ""
     twitch_client_secret: str = ""
+    # Broadcaster user OAuth (ads countdown / snooze). Access + refresh tokens
+    # live in the keyring; login/id are non-secret and stored in config.
+    twitch_user_id: str = ""
+    twitch_user_login: str = ""
+    twitch_access_secret_id: str = ""
+    twitch_refresh_secret_id: str = ""
     profiles: list[Profile] = field(default_factory=lambda: [Profile()])
     active_profile_id: str = ""
 
@@ -344,6 +400,12 @@ class DeckConfig:
             "snap_hint_dismissed": self.snap_hint_dismissed,
             "sleep_with_screen": self.sleep_with_screen,
             "show_tray": self.show_tray,
+            "window_pos_saved": bool(self.window_pos_saved),
+            "window_x": int(self.window_x),
+            "window_y": int(self.window_y),
+            "window_w": int(self.window_w),
+            "window_h": int(self.window_h),
+            "window_maximized": bool(self.window_maximized),
             "sound_sink": self.sound_sink,
             "sound_also_default": self.sound_also_default,
             "active_profile_id": self.active_profile_id,
@@ -361,6 +423,14 @@ class DeckConfig:
             d["twitch_secret_id"] = self.twitch_secret_id
         elif self.twitch_client_secret:
             d["twitch_client_secret"] = self.twitch_client_secret
+        if self.twitch_user_id:
+            d["twitch_user_id"] = self.twitch_user_id
+        if self.twitch_user_login:
+            d["twitch_user_login"] = self.twitch_user_login
+        if self.twitch_access_secret_id:
+            d["twitch_access_secret_id"] = self.twitch_access_secret_id
+        if self.twitch_refresh_secret_id:
+            d["twitch_refresh_secret_id"] = self.twitch_refresh_secret_id
         return d
 
     @classmethod
@@ -394,6 +464,25 @@ class DeckConfig:
                 obs_port = 4455
         except (TypeError, ValueError, OverflowError):
             obs_port = 4455
+
+        def _int_field(key: str, default: int, lo: int | None = None,
+                       hi: int | None = None) -> int:
+            try:
+                v = int(d.get(key, default))
+            except (TypeError, ValueError, OverflowError):
+                return default
+            if lo is not None:
+                v = max(lo, v)
+            if hi is not None:
+                v = min(hi, v)
+            return v
+
+        # Size is clamped to a usable minimum. Position may be negative
+        # (monitor left of the primary) and is only applied when saved.
+        window_x = _int_field("window_x", 0)
+        window_y = _int_field("window_y", 0)
+        window_w = _int_field("window_w", 1000, lo=400)
+        window_h = _int_field("window_h", 620, lo=300)
         cfg = cls(
             version=version,
             brightness=brightness,
@@ -401,6 +490,12 @@ class DeckConfig:
             snap_hint_dismissed=bool(d.get("snap_hint_dismissed", False)),
             sleep_with_screen=bool(d.get("sleep_with_screen", True)),
             show_tray=bool(d.get("show_tray", True)),
+            window_pos_saved=bool(d.get("window_pos_saved", False)),
+            window_x=window_x,
+            window_y=window_y,
+            window_w=window_w,
+            window_h=window_h,
+            window_maximized=bool(d.get("window_maximized", False)),
             sound_sink=_as_str(d.get("sound_sink"), ""),
             sound_also_default=bool(d.get("sound_also_default", True)),
             obs_host=_as_str(d.get("obs_host"), "127.0.0.1") or "127.0.0.1",
@@ -410,6 +505,11 @@ class DeckConfig:
             twitch_client_id=_as_str(d.get("twitch_client_id"), ""),
             twitch_secret_id=_as_str(d.get("twitch_secret_id"), ""),
             twitch_client_secret=_as_str(d.get("twitch_client_secret"), ""),
+            twitch_user_id=_as_str(d.get("twitch_user_id"), ""),
+            twitch_user_login=_as_str(d.get("twitch_user_login"), ""),
+            twitch_access_secret_id=_as_str(d.get("twitch_access_secret_id"), ""),
+            twitch_refresh_secret_id=_as_str(
+                d.get("twitch_refresh_secret_id"), ""),
             profiles=profiles,
             active_profile_id=_as_str(d.get("active_profile_id"), ""),
         )
@@ -831,7 +931,8 @@ def iter_config_secret_ids(config):
     key's action type is changed away). MUST be exhaustive: a missed reference
     would delete a secret still in use, which is worse than the leak it fixes.
     """
-    for attr in ("obs_secret_id", "twitch_secret_id"):
+    for attr in ("obs_secret_id", "twitch_secret_id",
+                 "twitch_access_secret_id", "twitch_refresh_secret_id"):
         sid = getattr(config, attr, "") or ""
         if isinstance(sid, str) and sid:
             yield sid
