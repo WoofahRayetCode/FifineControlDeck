@@ -1,132 +1,127 @@
 {
-  "bleep": {
-    "file": "bleep.wav",
-    "label": "Bleep (censor)",
-    "category": "Utility"
-  },
-  "boop": {
-    "file": "boop.wav",
-    "label": "Boop",
-    "category": "Utility"
-  },
-  "buzz": {
-    "file": "buzz.wav",
-    "label": "Buzz",
-    "category": "Utility"
-  },
-  "click": {
-    "file": "click.wav",
-    "label": "Click",
-    "category": "Utility"
-  },
-  "chime": {
-    "file": "chime.wav",
-    "label": "Chime",
-    "category": "Stinger"
-  },
-  "airhorn": {
-    "file": "airhorn.wav",
-    "label": "Airhorn",
+  "vine_boom": {
+    "file": "vine_boom.wav",
+    "label": "Vine boom (MyInstants)",
     "category": "Funny"
   },
-  "honk": {
-    "file": "honk.wav",
-    "label": "Honk",
+  "faaah": {
+    "file": "faaah.wav",
+    "label": "FAAAH (MyInstants)",
     "category": "Funny"
   },
-  "laugh": {
-    "file": "laugh.wav",
-    "label": "Laugh",
+  "spongebob_fail": {
+    "file": "spongebob_fail.wav",
+    "label": "SpongeBob fail (MyInstants)",
     "category": "Funny"
   },
-  "rimshot": {
-    "file": "rimshot.wav",
-    "label": "Rimshot",
+  "win_xp_error": {
+    "file": "win_xp_error.wav",
+    "label": "Win XP error (MyInstants)",
     "category": "Funny"
   },
-  "sad_trombone": {
-    "file": "sad_trombone.wav",
-    "label": "Sad trombone",
+  "taco_bell_bong": {
+    "file": "taco_bell_bong.wav",
+    "label": "Taco Bell bong (MyInstants)",
     "category": "Funny"
   },
-  "whoosh": {
-    "file": "whoosh.wav",
-    "label": "Whoosh",
-    "category": "Stinger"
+  "roblox_oof": {
+    "file": "roblox_oof.wav",
+    "label": "Roblox oof (MyInstants)",
+    "category": "Funny"
   },
-  "fart_squeak": {
-    "file": "fart_squeak.wav",
-    "label": "Fart (squeak)",
+  "bruh": {
+    "file": "bruh.wav",
+    "label": "Bruh (MyInstants)",
+    "category": "Funny"
+  },
+  "wrong_answer_buzzer": {
+    "file": "wrong_answer_buzzer.wav",
+    "label": "Wrong answer buzzer (MyInstants)",
+    "category": "Funny"
+  },
+  "huh_cat": {
+    "file": "huh_cat.wav",
+    "label": "Huh cat (MyInstants)",
+    "category": "Funny"
+  },
+  "gta_wasted": {
+    "file": "gta_wasted.wav",
+    "label": "GTA Wasted (MyInstants)",
+    "category": "Funny"
+  },
+  "fast_clapping": {
+    "file": "fast_clapping.wav",
+    "label": "Fast clapping (MyInstants)",
+    "category": "Funny"
+  },
+  "goofy_slip": {
+    "file": "goofy_slip.wav",
+    "label": "Goofy slip (MyInstants)",
+    "category": "Funny"
+  },
+  "wtf_boom": {
+    "file": "wtf_boom.wav",
+    "label": "WTF Boom (MyInstants)",
+    "category": "Funny"
+  },
+  "tf2_scout_scream": {
+    "file": "tf2_scout_scream.wav",
+    "label": "TF2 Scout scream (MyInstants)",
+    "category": "Funny"
+  },
+  "multi_yeet": {
+    "file": "multi_yeet.wav",
+    "label": "Multi Yeet (MyInstants)",
+    "category": "Funny"
+  },
+  "brain_fart": {
+    "file": "brain_fart.wav",
+    "label": "Brain fart (MyInstants)",
     "category": "Farts"
   },
-  "fart_wet": {
-    "file": "fart_wet.wav",
-    "label": "Fart (wet)",
+  "bark_fart": {
+    "file": "bark_fart.wav",
+    "label": "Bark fart (MyInstants)",
     "category": "Farts"
   },
-  "fart_long": {
-    "file": "fart_long.wav",
-    "label": "Fart (long)",
-    "category": "Farts"
-  },
-  "fart_trumpet": {
-    "file": "fart_trumpet.wav",
-    "label": "Fart (trumpet)",
-    "category": "Farts"
-  },
-  "fart_tiny": {
-    "file": "fart_tiny.wav",
-    "label": "Fart (tiny)",
-    "category": "Farts"
-  },
-  "circus": {
-    "file": "circus.wav",
-    "label": "Circus jingle",
+  "dexter_theme": {
+    "file": "dexter_theme.wav",
+    "label": "Dexter theme (MyInstants)",
     "category": "Music"
   },
-  "elevator": {
-    "file": "elevator.wav",
-    "label": "Elevator music",
+  "mii_channel_music": {
+    "file": "mii_channel_music.wav",
+    "label": "Mii Channel music (MyInstants)",
     "category": "Music"
   },
-  "fail_sting": {
-    "file": "fail_sting.wav",
-    "label": "Fail sting",
+  "zelda_item_get": {
+    "file": "zelda_item_get.wav",
+    "label": "LoZ item get (MyInstants)",
     "category": "Music"
   },
-  "fanfare": {
-    "file": "fanfare.wav",
-    "label": "Silly fanfare",
-    "category": "Music"
-  },
-  "sitcom": {
-    "file": "sitcom.wav",
-    "label": "Sitcom hit",
-    "category": "Music"
-  },
-  "kazoo": {
-    "file": "kazoo.wav",
-    "label": "Kazoo tune",
-    "category": "Music"
-  },
-  "boing": {
-    "file": "boing.wav",
-    "label": "Boing",
+  "zelda_hey_listen": {
+    "file": "zelda_hey_listen.wav",
+    "label": "LoZ Hey Listen (MyInstants)",
     "category": "Funny"
   },
-  "slide_down": {
-    "file": "slide_down.wav",
-    "label": "Slide whistle down",
+  "sonic_rings_falling": {
+    "file": "sonic_rings_falling.wav",
+    "label": "Sonic rings falling (MyInstants)",
+    "category": "Music"
+  },
+  "tiktok_india": {
+    "file": "tiktok_india.wav",
+    "label": "TikTok India (MyInstants)",
+    "category": "Music"
+  },
+  "gawd_dayum": {
+    "file": "gawd_dayum.wav",
+    "label": "Gawd dayum (MyInstants)",
     "category": "Funny"
   },
-  "slide_up": {
-    "file": "slide_up.wav",
-    "label": "Slide whistle up",
-    "category": "Funny"
-  },
-  "record_scratch": {
-    "file": "record_scratch.wav",
-    "label": "Record scratch",
+  "oh_my_god": {
+    "file": "oh_my_god.wav",
+    "label": "Oh my god (MyInstants)",
     "category": "Funny"
   }
 }
