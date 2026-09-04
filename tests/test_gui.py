@@ -163,6 +163,49 @@ def test_dropping_an_action_binds_it_with_a_default_icon(win):
     assert kc.label == "Volume"
 
 
+def test_dropping_a_system_monitor_preset_sets_the_metric(win):
+    w, cfg, c = win
+    w._on_action_dropped(5, "monitor?metric=gpupower")
+    kc = cfg.active_profile().pages[0].key(5)
+    assert kc.action.type == "monitor"
+    assert kc.action.params.get("metric") == "gpupower"
+    # Live readout is the face — presets must not stamp a library icon.
+    assert kc.icon == ""
+
+
+def test_dropping_a_soundboard_clip_sets_play_sound(win):
+    w, cfg, c = win
+    w._on_action_dropped(8, "play_sound?clip=vine_boom")
+    kc = cfg.active_profile().pages[0].key(8)
+    assert kc.action.type == "play_sound"
+    assert kc.action.params.get("clip") == "vine_boom"
+    assert kc.label == "Vine boom"
+    assert "play" in kc.icon
+
+
+def test_dropping_all_sounds_folder_chip(win):
+    from fifine_deck import sounds
+    w, cfg, c = win
+    w._on_action_dropped(9, "open_folder?preset=soundboard")
+    kc = cfg.active_profile().pages[0].key(9)
+    assert kc.action.type == "open_folder"
+    assert kc.label == "Memes"
+    assert kc.folder is not None
+    assert len(kc.folder.pages) >= 2
+    found = [
+        k.action.params["clip"]
+        for pg in kc.folder.pages
+        for k in pg.keys.values()
+        if k.action.type == "play_sound"
+    ]
+    expect = [c["name"] for c in sounds.list_clips() if c.get("path")]
+    assert found == expect
+    # Folders: Next on non-last pages; never Prev (Back is smart).
+    assert kc.folder.pages[0].keys[14].action.type == "next_page"
+    last_prev = kc.folder.pages[-1].keys.get(13)
+    assert last_prev is None or last_prev.is_empty()
+
+
 def test_selecting_a_key_tracks_the_selection(win):
     w, cfg, c = win
     w._on_key_selected(4)
@@ -1318,6 +1361,77 @@ def test_action_drop_on_the_page_it_started_on_still_applies(win):
     assert w._page().key(4).action.type == "run_command"
 
 
+def test_dragging_a_clip_onto_a_folder_moves_it_inside(win):
+    """Dropping a play-sound (or any) key onto a folder places it inside;
+    the source slot is cleared — not swapped with the folder."""
+    w, cfg, c = win
+    page = cfg.active_profile().pages[0]
+    folder_kc = page.key(2)
+    folder_kc.action = mw.Action("open_folder", {})
+    folder_kc.label = "Memes"
+    w._ensure_folder(folder_kc)
+    assert folder_kc.folder is not None
+
+    clip = page.key(5)
+    clip.label = "Bruh"
+    clip.action = mw.Action("play_sound", {"clip": "bruh"})
+    w.buttons[2].update_preview(folder_kc)
+    w.buttons[5].update_preview(clip)
+
+    w._on_key_moved(5, 2)
+
+    assert page.key(5).is_empty(), "source slot should be cleared"
+    assert page.key(2).action.type == "open_folder"
+    assert page.key(2) is folder_kc
+    # First empty slot inside the folder (Back occupies a high index).
+    inner = [kc for kc in folder_kc.folder.pages[0].keys.values()
+             if kc.action.type == "play_sound"]
+    assert len(inner) == 1
+    assert inner[0].label == "Bruh"
+    assert inner[0].action.params.get("clip") == "bruh"
+
+
+def test_dragging_onto_a_non_folder_still_swaps(win):
+    w, cfg, c = win
+    page = cfg.active_profile().pages[0]
+    a = page.key(3)
+    a.label = "A"
+    a.action = mw.Action("play_sound", {"clip": "bruh"})
+    b = page.key(4)
+    b.label = "B"
+    b.action = mw.Action("volume", {"cmd": "mute"})
+    w._on_key_moved(3, 4)
+    assert page.key(3).label == "B"
+    assert page.key(4).label == "A"
+
+
+def test_move_into_folder_refuses_a_cycle(win):
+    w, cfg, c = win
+    page = cfg.active_profile().pages[0]
+    outer = page.key(1)
+    outer.action = mw.Action("open_folder", {})
+    outer.label = "Outer"
+    w._ensure_folder(outer)
+    # Put an inner folder key on the outer page next to it, then try to
+    # nest outer inside that inner folder (cycle).
+    inner = page.key(2)
+    inner.action = mw.Action("open_folder", {})
+    inner.label = "Inner"
+    w._ensure_folder(inner)
+    # Place inner inside outer first.
+    w._on_key_moved(2, 1)
+    assert page.key(2).is_empty()
+    nested = [kc for kc in outer.folder.pages[0].keys.values()
+              if kc.action.type == "open_folder" and kc.label == "Inner"]
+    assert len(nested) == 1
+    # Now try to move Outer onto Inner (would cycle) — open Inner's page
+    # isn't on the grid; simulate by calling the helper with the nested key.
+    assert not w._move_key_into_folder(
+        page, 1, 1, outer, nested[0])
+    assert page.key(1).action.type == "open_folder"
+    assert _AutoBox.infos, "cycle should explain itself"
+
+
 def test_reorder_dialogs_do_not_leak(win, monkeypatch):
     """0.10.0 audit: ReorderDialog is parented to the long-lived MainWindow and
     was never deleteLater()d, on either the OK or the Cancel path — the leak
@@ -2287,6 +2401,21 @@ def test_key_context_menu_create_folder_signal(win, monkeypatch):
     assert kc.label == "FromMenu"
 
 
+def test_key_context_menu_delete_clears_key(win, monkeypatch):
+    w, cfg, c = win
+    kc = cfg.active_profile().pages[0].key(7)
+    kc.label = "Boom"
+    kc.action = mw.Action("play_sound", {"sound": "bruh"})
+    btn = w.buttons[7]
+    btn.update_preview(kc)
+    assert hasattr(btn, "deleteKey")
+    btn.deleteKey.emit(7)
+    default = mw.KeyConfig()
+    assert kc.label == default.label
+    assert kc.action.type == "none"
+    assert kc.is_empty()
+
+
 def test_key_context_menu_labels_depend_on_folder_state(win, monkeypatch):
     """Empty key: Create folder… + disabled Open. Folder key: Rename + Open."""
     from PyQt6.QtCore import QPoint
@@ -2303,10 +2432,14 @@ def test_key_context_menu_labels_depend_on_folder_state(win, monkeypatch):
     monkeypatch.setattr(wdg.QMenu, "exec", _capture)
     btn._context_menu(QPoint(0, 0))
     assert menus
-    labels = [a.text() for a in menus[0].actions()]
+    labels = [a.text() for a in menus[0].actions() if not a.isSeparator()]
     assert labels[0] == "Create folder…"
     assert labels[1] == "Open folder"
     assert not menus[0].actions()[1].isEnabled()
+    assert labels[2] == "Move to page"
+    assert not menus[0].actions()[2].isEnabled()
+    assert labels[-1] == "Delete"
+    assert not [a for a in menus[0].actions() if a.text() == "Delete"][0].isEnabled()
 
     kc = cfg.active_profile().pages[0].key(10)
     kc.action = mw.Action("open_folder", {})
@@ -2314,9 +2447,12 @@ def test_key_context_menu_labels_depend_on_folder_state(win, monkeypatch):
     btn.update_preview(kc)
     menus.clear()
     btn._context_menu(QPoint(0, 0))
-    labels = [a.text() for a in menus[0].actions()]
+    labels = [a.text() for a in menus[0].actions() if not a.isSeparator()]
     assert labels[0] == "Rename folder…"
     assert menus[0].actions()[1].isEnabled()
+    assert labels[2] == "Move to page"
+    assert labels[-1] == "Delete"
+    assert [a for a in menus[0].actions() if a.text() == "Delete"][0].isEnabled()
 
 
 def test_editor_open_folder_fills_empty_label_and_icon(win):
@@ -2404,3 +2540,67 @@ def test_tray_forced_off_by_env(win, monkeypatch):
     cfg.show_tray = True
     w._apply_tray()
     assert w.tray is None
+
+
+def test_move_folder_to_another_page(win):
+    """Context-menu Move to page relocates the folder key to an empty slot."""
+    from fifine_deck.model import Page
+    w, cfg, c = win
+    prof = cfg.active_profile()
+    prof.pages.append(Page(name="Second"))
+    w._reload_pages()
+
+    kc = prof.pages[0].key(3)
+    kc.action = mw.Action("open_folder", {})
+    w._ensure_folder(kc)
+    kc.label = "Cameras"
+    kc.folder.name = "Cameras"
+    folder = kc.folder
+
+    w._on_move_folder_to_page(3, 1)
+
+    assert c.page_index == 1
+    assert prof.pages[0].keys.get(3) is None or prof.pages[0].key(3).is_empty()
+    moved = prof.pages[1].keys.get(1) or next(
+        k for k in prof.pages[1].keys.values() if k.folder is folder)
+    assert moved.folder is folder
+    assert moved.label == "Cameras"
+    assert w.selected_index is not None
+    assert prof.pages[1].keys[w.selected_index].folder is folder
+
+
+def test_move_folder_warns_when_target_page_is_full(win):
+    from fifine_deck.device import DEVICE_PROFILE
+    from fifine_deck.model import Page, KeyConfig, Action
+    w, cfg, c = win
+    prof = cfg.active_profile()
+    prof.pages.append(Page(name="Full"))
+    dest = prof.pages[1]
+    for i in range(1, DEVICE_PROFILE["key_count"] + 1):
+        dest.keys[i] = KeyConfig(label=f"k{i}", action=Action("next_page", {}))
+
+    kc = prof.pages[0].key(2)
+    kc.action = mw.Action("open_folder", {})
+    w._ensure_folder(kc)
+    folder = kc.folder
+
+    _AutoBox.warns.clear()
+    w._on_move_folder_to_page(2, 1)
+
+    assert _AutoBox.warns
+    assert "empty" in _AutoBox.warns[0].lower()
+    assert prof.pages[0].key(2).folder is folder
+    assert c.page_index == 0
+
+
+def test_folder_move_page_targets_skip_current(win):
+    from fifine_deck.model import Page
+    w, cfg, c = win
+    cfg.active_profile().pages.append(Page(name="Extras"))
+    w._reload_pages()
+    targets = w._folder_move_page_targets()
+    assert targets == [(1, "2: Extras")]
+    c.page_index = 1
+    w._reload_pages()
+    targets = w._folder_move_page_targets()
+    assert targets == [(0, "Page 1")]
