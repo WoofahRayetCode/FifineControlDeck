@@ -21,7 +21,9 @@ import queue
 
 from . import actions, monitors, rendering
 from .device import DEVICE_PROFILE, FifineDeck, register
-from .model import DeckConfig, Profile, Page, KeyConfig
+from .model import (DeckConfig, Profile, Page, KeyConfig,
+                    PAGE_DISPLAY_TWITCH_CHAT)
+from .twitch_chat import TwitchChatClient
 
 from StreamDock.DeviceManager import DeviceManager
 from StreamDock.InputTypes import EventType
@@ -30,6 +32,14 @@ from StreamDock.InputTypes import EventType
 # action are dispatched instantly on press-down, exactly as before 0.8.0 —
 # the threshold only ever delays keys that define a second action.
 HOLD_THRESHOLD = 0.5
+# Twitch chat page: double-press the top-left key (index 1) within this window
+# to leave chat and return to a normal chip/keys page.
+CHAT_BACK_DOUBLE_PRESS = 0.45
+# Marquee step for chat chips whose text is wider than the key.
+CHAT_SCROLL_PX = 3
+# Tick while a chat page may need marquee updates (monitor keys still
+# self-rate-limit via their intervals).
+CHAT_SCROLL_TICK = 0.12
 
 
 class _PendingHold:
@@ -97,6 +107,8 @@ class DeckController:
         try:
             from . import twitch
             twitch.set_creds_provider(self.twitch_credentials)
+            twitch.set_user_session_provider(self.twitch_user_session)
+            twitch.set_user_session_saver(self.save_twitch_user_session)
         except Exception:
             log.debug("twitch creds provider not wired", exc_info=True)
         self._monitor_state: dict[int, tuple] = {}  # key index -> (last_t, signature)
@@ -105,12 +117,30 @@ class DeckController:
         self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self._monitor_thread.start()
 
+        # Twitch chat page mode: anonymous IRC reader + dirty flag for repaints.
+        self._chat_dirty = False
+        self._chat_back_last = 0.0       # monotonic time of last key-1 press
+        # Marquee offsets keyed by a stable message fingerprint (or "header").
+        self._chat_scroll: dict[str, int] = {}
+        self._chat = TwitchChatClient(
+            on_message=self._on_chat_message,
+            on_status=self._on_chat_status,
+        )
+        # Photo-page GIF animation: list of (tiles_dict, delay_ms).
+        self._photo_anim: list | None = None
+        self._photo_anim_key: tuple = ()
+        self._photo_frame_i = 0
+        self._photo_frame_due = 0.0
+
         # observer callbacks (optional)
         self.on_connect: Optional[Callable[[FifineDeck], None]] = None
         self.on_disconnect: Optional[Callable[[], None]] = None
         self.on_key_event: Optional[Callable[[int, bool], None]] = None
         self.on_page_changed: Optional[Callable[[], None]] = None
         self.on_monitor_image: Optional[Callable[[int, object, str], None]] = None
+        # Fired when the Twitch chat buffer or connection status changes, so the
+        # GUI chat panel can refresh without polling.
+        self.on_chat_updated: Optional[Callable[[], None]] = None
         # Fired when brightness is changed from the DECK (a brightness key), so
         # the GUI slider can follow. Without it the slider kept its stale value
         # and the next one-step nudge slammed the device back to it.
@@ -371,6 +401,10 @@ class DeckController:
         self._stopped = True
         self._cancel_holds()
         self._monitor_stop.set()
+        try:
+            self._chat.stop()
+        except Exception:
+            log.debug("twitch chat stop failed", exc_info=True)
         # Make room first: the queue is bounded now, and a plain put() on a
         # full one would block the whole shutdown behind a worker that is
         # itself inside a multi-action delay.
@@ -790,6 +824,7 @@ class DeckController:
             # page's monitor keys sample + paint on the next tick instead of
             # inheriting a stale timestamp/signature from the old page.
             self._monitor_state.clear()
+            self._sync_chat_locked()
             dev = self.device
             if dev:
                 # drop animations from the previous page before re-rendering
@@ -800,8 +835,14 @@ class DeckController:
                         pass
                     self._key_faces.pop(k, None)
                 self._gif_keys.clear()
-                for i in range(1, dev.KEY_COUNT + 1):
-                    self.render_key(i)
+                page = self.page()
+                if page.is_twitch_chat():
+                    self._render_chat_page_locked()
+                elif page.is_photo():
+                    self._render_photo_page_locked()
+                else:
+                    for i in range(1, dev.KEY_COUNT + 1):
+                        self.render_key(i)
                 self._sync_gif_loop()
                 try:
                     dev.refresh()
@@ -810,16 +851,336 @@ class DeckController:
         # Fire even with no device so the GUI resyncs (e.g. editing folders offline).
         if self.on_page_changed:
             self.on_page_changed()
+        if self.on_chat_updated:
+            try:
+                self.on_chat_updated()
+            except Exception:
+                log.debug("on_chat_updated failed", exc_info=True)
+
+    # -- Twitch chat page --------------------------------------------------
+    def chat_messages(self):
+        return self._chat.messages()
+
+    def chat_status(self) -> str:
+        return self._chat.status()
+
+    def _on_chat_message(self, _msg) -> None:
+        self._chat_dirty = True
+        if self.on_chat_updated:
+            try:
+                self.on_chat_updated()
+            except Exception:
+                log.debug("on_chat_updated failed", exc_info=True)
+
+    def _on_chat_status(self, _status: str) -> None:
+        self._chat_dirty = True
+        if self.on_chat_updated:
+            try:
+                self.on_chat_updated()
+            except Exception:
+                log.debug("on_chat_updated failed", exc_info=True)
+
+    def _sync_chat_locked(self) -> None:
+        """Follow or drop the IRC channel for the visible page. Caller holds lock."""
+        page = self.page()
+        if page.is_twitch_chat():
+            self._chat.set_channel(page.chat_channel)
+        else:
+            self._chat.set_channel("")
+
+    @staticmethod
+    def _chat_msg_key(msg) -> str:
+        return f"{msg.ts:.3f}|{msg.user}|{msg.text}"
+
+    def _chat_scroll_px(self, key: str, text: str, size: int,
+                        *, header: bool = False) -> int:
+        """Advance and return marquee offset when ``text`` overflows the chip."""
+        text_w, view_w, _ = rendering.chat_body_metrics(
+            size, text, header=header)
+        if text_w <= view_w:
+            self._chat_scroll.pop(key, None)
+            return 0
+        gap = max(view_w // 3, 16)
+        period = text_w + gap
+        offset = (self._chat_scroll.get(key, 0) + CHAT_SCROLL_PX) % period
+        self._chat_scroll[key] = offset
+        return offset
+
+    def _chat_has_overflow_locked(self, size: int) -> bool:
+        """True if any visible chat tile is currently marquee-scrolling."""
+        page = self.page()
+        if not page.is_twitch_chat():
+            return False
+        channel = (page.chat_channel or "").strip().lstrip("#").lower()
+        status = self._chat.status()
+        detail = "2× tap → chips"
+        if channel and status:
+            detail = f"{status}  2× tap → chips"
+        elif not channel:
+            detail = "set channel  2× tap → chips"
+        tw, vw, _ = rendering.chat_body_metrics(size, detail, header=True)
+        if tw > vw:
+            return True
+        slots = max(0, int(DEVICE_PROFILE.get("key_count", 15)) - 1)
+        for msg in self._chat.messages()[-slots:]:
+            tw, vw, _ = rendering.chat_body_metrics(size, msg.text)
+            if tw > vw:
+                return True
+        return False
+
+    def _render_chat_page_locked(self) -> None:
+        """Paint recent chat lines across every key. Caller holds lock."""
+        dev = self.device
+        if not dev:
+            return
+        page = self.page()
+        channel = (page.chat_channel or "").strip().lstrip("#").lower()
+        msgs = self._chat.messages()
+        status = self._chat.status()
+        count = dev.KEY_COUNT
+        size = dev.KEY_PIXEL_WIDTH
+        # Key 1 = header/status; remaining keys = chronological messages.
+        slots = max(0, count - 1)
+        chunk = msgs[-slots:] if slots else []
+        # Pad on the left so newest sits toward the end of the grid.
+        while len(chunk) < slots:
+            chunk.insert(0, None)
+
+        # Drop scroll state for messages no longer on the board.
+        live_keys = {"header"}
+        for msg in chunk:
+            if msg is not None:
+                live_keys.add(self._chat_msg_key(msg))
+        for stale in list(self._chat_scroll):
+            if stale not in live_keys:
+                self._chat_scroll.pop(stale, None)
+
+        for index in range(1, count + 1):
+            try:
+                if index in self._gif_keys:
+                    try:
+                        dev.clear_key_gif(index)
+                    except Exception:
+                        pass
+                    self._gif_keys.discard(index)
+                    self._key_faces.pop(index, None)
+                if index == 1:
+                    header = f"#{channel}" if channel else "#chat"
+                    # Top-left chip is the exit affordance: double-press returns
+                    # to a normal keys/chip page.
+                    detail = "2× tap → chips"
+                    if channel and status:
+                        detail = f"{status}  2× tap → chips"
+                    elif not channel:
+                        detail = "set channel  2× tap → chips"
+                    scroll = self._chat_scroll_px(
+                        "header", detail, size, header=True)
+                    img = rendering.render_chat_tile(
+                        size, header=header, text=detail, scroll_px=scroll)
+                else:
+                    msg = chunk[index - 2]
+                    if msg is None:
+                        img = rendering.render_chat_tile(size, user="", text="")
+                    else:
+                        scroll = self._chat_scroll_px(
+                            self._chat_msg_key(msg), msg.text, size)
+                        img = rendering.render_chat_tile(
+                            size,
+                            user=msg.user,
+                            text=msg.text,
+                            user_color=msg.color,
+                            scroll_px=scroll,
+                        )
+                if self._key_face_changed(index, img):
+                    res = dev.set_key_image_pil(index, img)
+                    self._note_write_result(res, index)
+                    if res is None or (isinstance(res, int) and res != 0):
+                        self._forget_key_face(index)
+            except Exception as e:
+                log.error("chat key %s render failed: %s", index, e)
+        self._chat_dirty = False
+
+    def chat_tick(self) -> None:
+        """Repaint the chat page on new IRC lines or while marquee is active."""
+        with self._lock:
+            if not self.page().is_twitch_chat():
+                self._chat_dirty = False
+                self._chat_scroll.clear()
+                return
+            size = (self.device.KEY_PIXEL_WIDTH if self.device
+                    else int(DEVICE_PROFILE["key_size"]))
+            scrolling = self._chat_has_overflow_locked(size)
+            if not self._chat_dirty and not scrolling:
+                return
+            if self.device:
+                self._render_chat_page_locked()
+                try:
+                    self.device.refresh()
+                except Exception as e:
+                    log.error("chat refresh failed: %s", e)
+            else:
+                # Still advance scroll state so it stays coherent offline.
+                if scrolling:
+                    self._render_chat_page_locked()
+                self._chat_dirty = False
+
+    def _ensure_photo_anim_locked(self, path: str, cols: int, rows: int,
+                                  size: int) -> list:
+        """Load (or reuse) tiled GIF/still frames for the photo page."""
+        path = os.path.expanduser((path or "").strip())
+        key = (path, cols, rows, size)
+        if self._photo_anim is not None and self._photo_anim_key == key:
+            return self._photo_anim
+        anim: list = []
+        if path:
+            lower = path.lower()
+            if lower.endswith((".gif", ".webp")):
+                anim = rendering.load_page_gif_animation(
+                    path, cols, rows, size)
+            if not anim:
+                tiles = rendering.slice_photo_tiles(path, cols, rows, size)
+                if tiles:
+                    anim = [(tiles, 100)]
+        self._photo_anim = anim
+        self._photo_anim_key = key
+        self._photo_frame_i = 0
+        self._photo_frame_due = 0.0
+        return anim
+
+    def _render_photo_page_locked(self) -> None:
+        """Spread ``page.photo_path`` across every key. Caller holds lock.
+
+        Multi-frame GIF/WebP files are animated by :meth:`photo_tick`.
+        """
+        dev = self.device
+        if not dev:
+            return
+        page = self.page()
+        path = (page.photo_path or "").strip()
+        cols = int(DEVICE_PROFILE.get("cols", 5))
+        rows = int(DEVICE_PROFILE.get("rows", 3))
+        size = dev.KEY_PIXEL_WIDTH
+        anim = self._ensure_photo_anim_locked(path, cols, rows, size)
+        tiles: dict = {}
+        if anim:
+            i = max(0, min(self._photo_frame_i, len(anim) - 1))
+            tiles, delay = anim[i]
+            if self._photo_frame_due <= 0:
+                self._photo_frame_due = time.monotonic() + (delay / 1000.0)
+        for index in range(1, dev.KEY_COUNT + 1):
+            try:
+                if index in self._gif_keys:
+                    try:
+                        dev.clear_key_gif(index)
+                    except Exception:
+                        pass
+                    self._gif_keys.discard(index)
+                    self._key_faces.pop(index, None)
+                tile = tiles.get(index)
+                if tile is None:
+                    # Missing/undecodable photo: dark placeholder + hint on key 1.
+                    img = rendering.render_chat_tile(
+                        size,
+                        header="Photo",
+                        text=("pick image/GIF\n2× tap → chips"
+                              if index == 1 else ""),
+                    )
+                else:
+                    img = tile
+                    if index == 1:
+                        img = rendering.badge_photo_back_tile(img)
+                if self._key_face_changed(index, img):
+                    res = dev.set_key_image_pil(index, img)
+                    self._note_write_result(res, index)
+                    if res is None or (isinstance(res, int) and res != 0):
+                        self._forget_key_face(index)
+            except Exception as e:
+                log.error("photo key %s render failed: %s", index, e)
+
+    def photo_tick(self) -> None:
+        """Advance a photo-page GIF and repaint when the frame delay elapses."""
+        with self._lock:
+            if not self.page().is_photo() or not self.device:
+                return
+            anim = self._photo_anim
+            if not anim or len(anim) < 2:
+                return
+            now = time.monotonic()
+            if self._photo_frame_due <= 0:
+                _, delay = anim[self._photo_frame_i % len(anim)]
+                self._photo_frame_due = now + (delay / 1000.0)
+                return
+            if now < self._photo_frame_due:
+                return
+            self._photo_frame_i = (self._photo_frame_i + 1) % len(anim)
+            _, delay = anim[self._photo_frame_i]
+            self._photo_frame_due = now + (delay / 1000.0)
+            self._render_photo_page_locked()
+            try:
+                self.device.refresh()
+            except Exception as e:
+                log.error("photo gif refresh failed: %s", e)
+
+    def exit_to_keys_page(self) -> None:
+        """Leave a special page (chat / photo) for a normal keys/chip page.
+
+        Prefers the previous page when it is a keys page; otherwise the first
+        keys page in the current container. No-op if every page is special.
+        """
+        with self._lock:
+            pages = self.container().pages
+            cur = self.page_index
+            if not (0 <= cur < len(pages)) or not pages[cur].is_special():
+                return
+            target = None
+            if cur > 0 and not pages[cur - 1].is_special():
+                target = cur - 1
+            else:
+                for i, pg in enumerate(pages):
+                    if i != cur and not pg.is_special():
+                        target = i
+                        break
+            if target is None:
+                log.info("no keys page to return to from special page")
+                return
+            self.page_index = target
+            self._chat_back_last = 0.0
+        self.render_page()
+
+    def exit_twitch_chat_page(self) -> None:
+        """Compatibility alias for :meth:`exit_to_keys_page`."""
+        self.exit_to_keys_page()
+
+    def _special_back_press(self) -> None:
+        """Double-press top-left key on a special page to return to chips."""
+        now = time.monotonic()
+        last = self._chat_back_last
+        self._chat_back_last = now
+        if last and (now - last) <= CHAT_BACK_DOUBLE_PRESS:
+            self._chat_back_last = 0.0
+            self._enqueue(self.exit_to_keys_page)
+
+    def _chat_header_press(self) -> None:
+        """Compatibility alias for :meth:`_special_back_press`."""
+        self._special_back_press()
 
     # -- monitor keys ------------------------------------------------------
     def _monitor_loop(self):
-        # 0.5 s scheduler granularity. With no monitor keys on the visible
-        # page a tick is a single dict scan — no metric is ever sampled.
-        while not self._monitor_stop.wait(0.5):
+        # Fine-grained wait so chat marquees can advance smoothly; monitor
+        # keys still self-rate-limit via their refresh intervals.
+        while not self._monitor_stop.wait(CHAT_SCROLL_TICK):
             try:
                 self.monitor_tick()
             except Exception as e:      # a tick must never kill the thread
                 log.error("monitor tick failed: %s", e)
+            try:
+                self.chat_tick()
+            except Exception as e:
+                log.error("chat tick failed: %s", e)
+            try:
+                self.photo_tick()
+            except Exception as e:
+                log.error("photo tick failed: %s", e)
 
     def monitor_tick(self, now: float | None = None) -> None:
         """Sample and repaint the monitor keys of the visible page that are
@@ -827,6 +1188,8 @@ class DeckController:
         directly with a fake clock in tests."""
         now = time.monotonic() if now is None else now
         with self._lock:
+            if self.page().is_special():
+                return
             page = self.page()
             dev = self.device
             size = dev.KEY_PIXEL_WIDTH if dev else int(DEVICE_PROFILE["key_size"])
@@ -1024,6 +1387,9 @@ class DeckController:
             dev = self.device
             if not dev or index in self._gif_keys:
                 return
+            if self.page().is_special():
+                # Special pages own every key face; a press flash would clobber them.
+                return
             if not pressed:
                 if index not in self._flashed:
                     return              # never flashed (e.g. glow was off)
@@ -1063,6 +1429,17 @@ class DeckController:
             if pressed:
                 if index in self._holds:
                     return                       # duplicate down (missed release)
+                # Special pages (chat / photo): top-left key (1) is reserved
+                # for double-tap back to a normal chip/keys page.
+                with self._lock:
+                    on_special = self.page().is_special()
+                if on_special and index == 1:
+                    self._special_back_press()
+                    return
+                if on_special:
+                    # Other tiles have no actions; ignore presses so a leftover
+                    # key binding cannot fire under the special face.
+                    return
                 kc = self.page().keys.get(index)
                 if not kc:
                     return
@@ -1204,6 +1581,69 @@ class DeckController:
             secret = getattr(cfg, "twitch_client_secret", "") or ""
         return client_id, secret
 
+    def twitch_user_session(self) -> tuple[str, str, str, str]:
+        """(access, refresh, user_id, user_login) for ads OAuth."""
+        from . import secret_store
+        cfg = self.config
+        access = ""
+        refresh = ""
+        aid = getattr(cfg, "twitch_access_secret_id", "") or ""
+        rid = getattr(cfg, "twitch_refresh_secret_id", "") or ""
+        if aid:
+            access = secret_store.get(aid) or ""
+        if rid:
+            refresh = secret_store.get(rid) or ""
+        return (
+            access,
+            refresh,
+            getattr(cfg, "twitch_user_id", "") or "",
+            getattr(cfg, "twitch_user_login", "") or "",
+        )
+
+    def save_twitch_user_session(self, access: str, refresh: str,
+                                 user_id: str, login: str) -> None:
+        """Persist refreshed/new user tokens into keyring + config."""
+        from . import secret_store
+        cfg = self.config
+        access = (access or "").strip()
+        refresh = (refresh or "").strip()
+        cfg.twitch_user_id = (user_id or "").strip()
+        cfg.twitch_user_login = (login or "").strip().lstrip("#").lower()
+        if not access or not refresh:
+            return
+        aid = cfg.twitch_access_secret_id or secret_store.new_id()
+        rid = cfg.twitch_refresh_secret_id or secret_store.new_id()
+        if secret_store.store(aid, access) and secret_store.store(rid, refresh):
+            cfg.twitch_access_secret_id = aid
+            cfg.twitch_refresh_secret_id = rid
+        else:
+            log.warning(
+                "keyring refused Twitch user tokens — ads login not persisted")
+            return
+        try:
+            cfg.save()
+        except Exception:
+            log.warning("could not save config after Twitch user login",
+                        exc_info=True)
+
+    def clear_twitch_user_session(self) -> None:
+        """Log out: drop user token secret ids and in-memory cache."""
+        from . import secret_store, twitch
+        cfg = self.config
+        for attr in ("twitch_access_secret_id", "twitch_refresh_secret_id"):
+            sid = getattr(cfg, attr, "") or ""
+            if sid:
+                secret_store.delete(sid)
+                setattr(cfg, attr, "")
+        cfg.twitch_user_id = ""
+        cfg.twitch_user_login = ""
+        twitch.clear_user_session_cache()
+        try:
+            cfg.save()
+        except Exception:
+            log.warning("could not save config after Twitch logout",
+                        exc_info=True)
+
     def sleep_screen(self) -> None:
         with self._lock:
             if self.device:
@@ -1235,6 +1675,53 @@ class DeckController:
         with self._lock:
             n = len(self.container().pages)
             self.page_index = max(0, min(index, n - 1))
+        self.render_page()
+
+    def show_twitch_chat(self, channel: str = "") -> None:
+        """Switch to a Twitch chat page (create one if none exists).
+
+        Used by the **Twitch chat** chip. Prefers a page whose channel matches
+        ``channel`` when given; otherwise the first chat page. An empty
+        ``channel`` still opens chat — set the channel on the page (or on the
+        chip) for live IRC.
+        """
+        wanted = (channel or "").strip().lstrip("#").lower()
+
+        def _norm(pg: Page) -> str:
+            return (pg.chat_channel or "").strip().lstrip("#").lower()
+
+        with self._lock:
+            pages = self.container().pages
+            target: int | None = None
+            if wanted:
+                for i, pg in enumerate(pages):
+                    if pg.is_twitch_chat() and _norm(pg) == wanted:
+                        target = i
+                        break
+            if target is None:
+                for i, pg in enumerate(pages):
+                    if not pg.is_twitch_chat():
+                        continue
+                    target = i
+                    # Fill an unset channel from the chip so the page can
+                    # actually join IRC without a separate GUI edit.
+                    if wanted and not _norm(pg):
+                        pg.chat_channel = wanted
+                        if not pg.name or pg.name.lower() in (
+                                "page", "main", "twitch chat"):
+                            pg.name = f"Chat {wanted}"
+                    break
+            if target is None:
+                name = f"Chat {wanted}" if wanted else "Twitch chat"
+                pages.append(Page(
+                    name=name,
+                    display_mode=PAGE_DISPLAY_TWITCH_CHAT,
+                    chat_channel=wanted,
+                ))
+                target = len(pages) - 1
+                log.info("created Twitch chat page %r (channel=%r)",
+                         name, wanted)
+            self.page_index = target
         self.render_page()
 
     def next_page(self) -> None:
