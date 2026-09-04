@@ -30,8 +30,10 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 No restart needed: the app watches for `change` uevents and picks up the new
 permissions by itself.
 
-If your distro uses the `plugdev` group rather than uaccess, also
-`sudo usermod -aG plugdev "$USER"` and log back in.
+Access is via the seat `uaccess` ACL — a `plugdev` group is optional and
+absent on Arch/CachyOS/Fedora. On Debian/Ubuntu you may still
+`sudo usermod -aG plugdev "$USER"` and log back in if you want the group
+fallback, but it is not required when uaccess works.
 
 ## Optional helpers, not bundled
 
