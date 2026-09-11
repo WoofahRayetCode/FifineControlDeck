@@ -518,7 +518,10 @@ def run_gui(quit_flag: bool = False, hidden: bool = False) -> int:
     server.newConnection.connect(_on_conn)
 
     if not hidden:
-        win.show()
+        if config.start_minimized:
+            win.showMinimized()
+        else:
+            win.show()
 
     # start the device in the background (non-fatal if absent)
     controller.start()

@@ -60,6 +60,7 @@ def test_memes_folder_lists_meme_clips_across_pages():
     assert "gawd_dayum" in found
     assert "vine_boom" in found
     assert "multi_yeet" in found
+    assert "rizz" in found
     assert "bleep" not in found
 
 

@@ -747,6 +747,14 @@ def test_window_geometry_round_trips():
     assert tiny.window_w >= 400 and tiny.window_h >= 300
 
 
+def test_start_minimized_round_trips():
+    c = DeckConfig()
+    assert c.start_minimized is False
+    c.start_minimized = True
+    assert DeckConfig.from_dict(c.to_dict()).start_minimized is True
+    assert DeckConfig.from_dict({}).start_minimized is False
+
+
 def _cfg_with_action(action):
     return DeckConfig.from_dict({"profiles": [{"name": "P", "pages": [
         {"keys": {"1": {"label": "x", "action": action}}}]}]})

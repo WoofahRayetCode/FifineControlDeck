@@ -1,13 +1,14 @@
 """
 System-monitor keys: live CPU / RAM / VRAM / GPU / temperature / network /
-disk / process-RAM / CPU+GPU power / Twitch viewers+uptime readouts — plus
-a clock face — rendered onto a key's LCD (like the monitor widgets in the
-official Stream Dock app).
+disk / process-RAM / CPU+GPU power / Twitch viewers+uptime / MangoHud FPS
+readouts — plus a clock face — rendered onto a key's LCD (like the monitor
+widgets in the official Stream Dock app).
 
 Two halves:
 - Sampler   — polls the metrics (psutil for CPU/RAM/disk/network/temps/
               process RSS, RAPL for CPU power, per-vendor sources for VRAM /
-              GPU load / GPU power, Twitch Helix for live viewers/uptime)
+              GPU load / GPU power, Twitch Helix for live viewers/uptime,
+              MangoHud CSV logs for in-game FPS)
               and keeps the short history a sparkline needs.
 - render_monitor — draws a Reading as a key image in one of three styles
               (number / gauge / graph), reusing the app font + colour helpers.
@@ -21,6 +22,7 @@ from __future__ import annotations
 import glob
 import logging
 import os
+import re
 import threading
 import time
 from collections import deque
@@ -59,6 +61,7 @@ METRICS = {
     "twitchviewers": "LIVE",
     "twitchuptime": "UPTIME",
     "twitchad": "AD",
+    "fps": "FPS",
 }
 STYLES = ("number", "gauge", "graph")
 # Clock faces: "auto" keeps the 0.7.0 behavior (seconds iff refreshing under
@@ -78,11 +81,21 @@ PERCENT_METRICS = frozenset({
     "gputemp", "cputemp", "igputemp", "procram",
 })
 # the only metrics a target applies to (disk mount, net iface, temp sensor,
-# process name for procram, or Twitch channel login)
+# process name for procram, Twitch channel login, or MangoHud log path / game)
 TARGETED_METRICS = frozenset({
     "disk", "net", "temp", "procram", "twitchviewers", "twitchuptime",
-    "twitchad",
+    "twitchad", "fps",
 })
+
+# MangoHud CSV names look like game_2024-01-15_14-30-00.csv (not *_summary.csv).
+_MANGOHUD_LOG_RE = re.compile(
+    r"^.+_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.csv$",
+)
+# How long after the last write a log is still treated as "the live game".
+# MangoHud's default log_interval is 100 ms; a few seconds covers hitch pauses.
+_MANGOHUD_STALE_S = 5.0
+# Re-scan directories at most this often when a cached log path goes cold.
+_MANGOHUD_RESCAN_S = 1.0
 
 HISTORY_LEN = 32             # sparkline points kept per metric
 # Sampled streams kept before the least recently used half is dropped. A deck
@@ -273,6 +286,12 @@ class Sampler:
         # over the tests.
         self._stream_seen: dict[tuple, int] = {}
         self._stream_clock = 0
+        # MangoHud FPS: cache the live CSV path per target so we do not readdir
+        # on every 0.5 s tick. Cleared when the target changes or the file ages
+        # out (see _sample_fps).
+        self._fps_log_path: str | None = None
+        self._fps_log_target: str = ""
+        self._fps_next_scan: float = 0.0
 
     # -- public ------------------------------------------------------------
     def sample(self, spec: MonitorSpec) -> Reading:
@@ -843,6 +862,49 @@ class Sampler:
         return Reading(pct, twitch.fmt_ad_countdown(until), dur,
                        sample=float(until))
 
+    def _sample_fps(self, spec: MonitorSpec) -> Reading:
+        """In-game FPS from a live MangoHud CSV log.
+
+        MangoHud must be wrapping the game with logging on, e.g. Steam launch
+        options::
+
+            MANGOHUD_CONFIG=log_interval=100,autostart_log=1,output_folder=/tmp/fifine_mangohud mangohud %command%
+
+        Target (optional): a log directory, a specific ``.csv`` path, or a
+        game/program name prefix matching ``{name}_YYYY-MM-DD_HH-MM-SS.csv``.
+        Empty target scans the usual folders (``/tmp/fifine_mangohud``,
+        StreamController's ``/tmp/sc_mangohud``, ``~/.local/share/MangoHud``,
+        and ``$HOME`` for MangoHud's default).
+        """
+        target = (spec.target or "").strip()
+        now = time.monotonic()
+        path = self._fps_log_path
+        if target != self._fps_log_target:
+            path = None
+            self._fps_log_target = target
+            self._fps_next_scan = 0.0
+        if path and not _mangohud_log_is_live(path, now_wall=time.time()):
+            path = None
+        if path is None and now >= self._fps_next_scan:
+            path = _mangohud_find_log(target)
+            self._fps_next_scan = now + _MANGOHUD_RESCAN_S
+        self._fps_log_path = path
+        if not path:
+            return Reading(None, "—", "no MangoHud", ok=True)
+        parsed = _mangohud_read_fps(path)
+        if parsed is None:
+            return Reading(None, "—", "waiting", ok=True)
+        fps, frametime, game = parsed
+        # Soft 0..144 gauge so a gauge-style key still paints; graph uses the
+        # raw FPS via sample= (auto-scaled). High FPS lighting WARN is odd but
+        # matches the shared accent rule used by power metrics.
+        pct = max(0.0, min(100.0, fps * 100.0 / 144.0))
+        text = f"{fps:.0f}" if fps >= 10 else f"{fps:.1f}"
+        sub = f"{frametime:.1f} ms"
+        if game:
+            sub = f"{sub} · {game}"
+        return Reading(pct, text, sub, sample=fps)
+
 
 _NO_PSUTIL = Reading(None, "n/a", "psutil missing", ok=False)
 
@@ -851,6 +913,139 @@ def _fmt_watts(w: float) -> str:
     if w < 10:
         return f"{w:.1f} W"
     return f"{w:.0f} W"
+
+
+def _mangohud_default_dirs() -> list[str]:
+    """Directories scanned when the FPS key's Target is empty."""
+    dirs: list[str] = [
+        "/tmp/fifine_mangohud",
+        "/tmp/sc_mangohud",
+    ]
+    home = os.path.expanduser("~")
+    if home and home != "~":
+        dirs.append(os.path.join(home, ".local", "share", "MangoHud"))
+        dirs.append(home)
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    if runtime:
+        dirs.append(os.path.join(runtime, "mangohud"))
+    # De-dupe while preserving order.
+    seen: set[str] = set()
+    out: list[str] = []
+    for d in dirs:
+        if d and d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
+
+
+def _mangohud_game_from_name(filename: str) -> str:
+    """``eldenring_2024-01-15_14-30-00.csv`` → ``eldenring``."""
+    base = os.path.basename(filename)
+    if base.lower().endswith(".csv"):
+        base = base[:-4]
+    m = re.match(r"^(.+)_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$", base)
+    return m.group(1) if m else base
+
+
+def _mangohud_log_is_live(path: str, now_wall: float | None = None,
+                          stale_s: float = _MANGOHUD_STALE_S) -> bool:
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return False
+    now = time.time() if now_wall is None else now_wall
+    return (now - mtime) <= stale_s
+
+
+def _mangohud_candidate_logs(target: str) -> list[str]:
+    """Resolve Target into candidate CSV paths (newest-first later)."""
+    target = (target or "").strip()
+    if target:
+        expanded = os.path.expanduser(target)
+        if os.path.isfile(expanded):
+            return [expanded]
+        if os.path.isdir(expanded):
+            return _mangohud_list_logs_in(expanded)
+        # Treat as a game/program name filter across the default dirs.
+        want = os.path.basename(expanded).lower()
+        hits: list[str] = []
+        for d in _mangohud_default_dirs():
+            for path in _mangohud_list_logs_in(d):
+                if _mangohud_game_from_name(path).lower().startswith(want):
+                    hits.append(path)
+        return hits
+    hits = []
+    for d in _mangohud_default_dirs():
+        hits.extend(_mangohud_list_logs_in(d))
+    return hits
+
+
+def _mangohud_list_logs_in(directory: str) -> list[str]:
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return []
+    out: list[str] = []
+    for name in names:
+        lower = name.lower()
+        if lower.endswith("_summary.csv"):
+            continue
+        # Require MangoHud's ``game_YYYY-MM-DD_HH-MM-SS.csv`` shape so a scan
+        # of $HOME (MangoHud's default output_folder) does not pick up random
+        # spreadsheets. An explicit file Target bypasses this filter.
+        if not _MANGOHUD_LOG_RE.match(name):
+            continue
+        out.append(os.path.join(directory, name))
+    return out
+
+
+def _mangohud_find_log(target: str) -> str | None:
+    """Newest live MangoHud CSV for this target, or None."""
+    now = time.time()
+    best_path = None
+    best_mtime = -1.0
+    for path in _mangohud_candidate_logs(target):
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if (now - mtime) > _MANGOHUD_STALE_S:
+            continue
+        if mtime > best_mtime:
+            best_mtime = mtime
+            best_path = path
+    return best_path
+
+
+def _mangohud_read_fps(path: str) -> tuple[float, float, str] | None:
+    """Return (fps, frametime_ms, game_label) from the last CSV data row."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 16384))
+            chunk = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    # Walk lines newest-first; skip headers / system-info / blank.
+    for line in reversed(chunk.splitlines()):
+        line = line.strip()
+        if not line or line.lower().startswith("fps,"):
+            continue
+        if line.lower().startswith(("os,", "v1", "----")):
+            continue
+        parts = line.split(",")
+        if len(parts) < 2:
+            continue
+        try:
+            fps = float(parts[0])
+            frametime = float(parts[1])
+        except ValueError:
+            continue
+        if fps < 0 or frametime < 0:
+            continue
+        return (fps, frametime, _mangohud_game_from_name(path))
+    return None
 
 
 def _find_rapl_package() -> str | None:

@@ -34,6 +34,11 @@
     "label": "Bruh (MyInstants)",
     "category": "Funny"
   },
+  "rizz": {
+    "file": "rizz.wav",
+    "label": "Rizz sound effect (MyInstants)",
+    "category": "Funny"
+  },
   "wrong_answer_buzzer": {
     "file": "wrong_answer_buzzer.wav",
     "label": "Wrong answer buzzer (MyInstants)",

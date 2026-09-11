@@ -20,6 +20,7 @@ _MEME_CLIPS: list[tuple[str, str]] = [
     ("win_xp_error", "XP Err"),
     ("taco_bell_bong", "Taco"),
     ("bruh", "Bruh"),
+    ("rizz", "Rizz"),
     ("roblox_oof", "Oof"),
     ("multi_yeet", "Yeet"),
     ("gawd_dayum", "Dayum"),

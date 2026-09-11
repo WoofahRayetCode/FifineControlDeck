@@ -11,7 +11,7 @@ def test_bundled_clips_are_myinstants_only():
     assert len(clips) >= 20
     names = {c["name"] for c in clips}
     for need in ("bruh", "vine_boom", "gawd_dayum", "oh_my_god", "brain_fart",
-                 "bark_fart", "wtf_boom", "multi_yeet", "tiktok_india"):
+                 "bark_fart", "wtf_boom", "multi_yeet", "tiktok_india", "rizz"):
         assert need in names
         path = sounds.resolve_clip(need)
         assert path and os.path.isfile(path)

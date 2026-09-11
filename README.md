@@ -116,22 +116,28 @@ expectations:
   records (or a null sink), and leave “Also play on default output” on so you
   still hear clips locally.
 - **System-monitor keys** — a key can show live **CPU, RAM, VRAM, GPU load,
-  GPU/CPU temperatures, CPU/GPU power (watts), process RAM, Twitch viewers /
-  stream uptime, network or disk-space** readouts (like the official app's
-  widgets) — or a **clock** (12h/24h, optional seconds and date) — as a big
-  number, a gauge (a network key falls back to the number face), or a scrolling
-  graph, with a configurable refresh interval. Keys showing the same metric
-  share one sample stream. Temperature keys pick the CPU package sensor by
-  default; the target field selects a disk mount, network iface, `psutil` temp
-  sensor (`chip` / `chip:label`, e.g. `nvme:Composite`), a process name for
-  **process RAM** (`procram`), or a Twitch login for **`twitchviewers`** /
-  **`twitchuptime`**. **`twitchad`** shows a countdown to the next Ads Manager
-  mid-roll (`Ad 4:32` / `NOW`); drag **Twitch ad countdown** from the Twitch
-  sidebar, and use **Snooze ad** to push the break back (~5 minutes). Twitch
-  needs **Options → Twitch settings…** (Client-ID + Client Secret from
+  GPU/CPU temperatures, CPU/GPU power (watts), process RAM, in-game FPS
+  (MangoHud), Twitch viewers / stream uptime, network or disk-space** readouts
+  (like the official app's widgets) — or a **clock** (12h/24h, optional seconds
+  and date) — as a big number, a gauge (a network key falls back to the number
+  face), or a scrolling graph, with a configurable refresh interval. Keys
+  showing the same metric share one sample stream. Temperature keys pick the
+  CPU package sensor by default; the target field selects a disk mount, network
+  iface, `psutil` temp sensor (`chip` / `chip:label`, e.g. `nvme:Composite`), a
+  process name for **process RAM** (`procram`), a Twitch login for
+  **`twitchviewers`** / **`twitchuptime`**, or a MangoHud log folder / `.csv` /
+  game name for **`fps`**. **`twitchad`** shows a countdown to the next Ads
+  Manager mid-roll (`Ad 4:32` / `NOW`); drag **Twitch ad countdown** from the
+  Twitch sidebar, and use **Snooze ad** to push the break back (~5 minutes).
+  Twitch needs **Options → Twitch settings…** (Client-ID + Client Secret from
   [dev.twitch.tv/console](https://dev.twitch.tv/console)); ads also need
   **Log in with Twitch** (device-code flow at twitch.tv/activate — no
   localhost redirect) with `channel:read:ads` / `channel:manage:ads`.
+  **FPS** needs the game launched under [MangoHud](https://github.com/flightlessmango/MangoHud)
+  with CSV logging; drag **FPS (MangoHud)** from the System sidebar. Recommended
+  Steam launch options:
+  `MANGOHUD_CONFIG=log_interval=100,autostart_log=1,output_folder=/tmp/fifine_mangohud mangohud %command%`
+  (also searches `/tmp/sc_mangohud`, `~/.local/share/MangoHud`, and `$HOME`).
   CPU power uses RAPL; GPU power uses NVML or AMD hwmon. VRAM and GPU load are
   best-effort per GPU vendor (NVIDIA via NVML — needs `python3-pynvml`; AMD via
   sysfs). On hybrid NVIDIA+AMD machines, dedicated **iGPU usage / VRAM /

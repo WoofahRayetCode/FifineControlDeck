@@ -20,7 +20,8 @@ def test_system_catalog_has_monitor_metric_presets():
     assert "System monitor" in labels
     for want in ("GPU usage", "GPU VRAM", "GPU wattage", "GPU temp",
                  "iGPU usage", "iGPU VRAM", "iGPU wattage", "iGPU temp",
-                 "CPU wattage", "CPU temp", "RAM usage", "Game process RAM"):
+                 "CPU wattage", "CPU temp", "RAM usage", "Game process RAM",
+                 "FPS (MangoHud)"):
         assert want in labels
     metrics = {
         actions.catalog_entry_params(e).get("metric")
@@ -29,7 +30,7 @@ def test_system_catalog_has_monitor_metric_presets():
     assert metrics == {
         "gpu", "vram", "gpupower", "gputemp",
         "igpu", "igpuvram", "igpupower", "igputemp",
-        "cpupower", "cputemp", "ram", "procram",
+        "cpupower", "cputemp", "ram", "procram", "fps",
     }
 
 

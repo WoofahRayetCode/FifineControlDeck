@@ -2480,6 +2480,7 @@ def test_minimize_to_taskbar_menu_exists(win):
     assert any("Minimize to taskbar" in t for t in opts)
     assert any("Create folder on selected key" in t for t in opts)
     assert any("Show in system tray" in t for t in opts)
+    assert any("Start minimized" in t for t in opts)
     assert any("Start on login" in t for t in opts)
     assert hasattr(w, "create_folder_btn")
     w._minimize_to_taskbar()

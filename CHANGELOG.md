@@ -17,6 +17,12 @@ follows [Semantic Versioning](https://semver.org/).
   maximized state and multi-monitor placements).
 
 ### Added
+- **FPS (MangoHud) monitor chip** (sidebar **System**): live in-game FPS and
+  frametime on a key by reading MangoHud’s CSV log. Launch the game with
+  MangoHud logging (recommended:
+  `MANGOHUD_CONFIG=log_interval=100,autostart_log=1,output_folder=/tmp/fifine_mangohud mangohud %command%`).
+  Optional Target: log folder, `.csv` path, or game name prefix. Shows `—`
+  when no live log is writing.
 - **KDE power profile chips** (sidebar **Power**): Performance, Balanced,
   Power Saver, and Cycle. Uses `powerprofilesctl` / power-profiles-daemon
   (same profiles as Plasma’s battery applet).
@@ -60,11 +66,12 @@ follows [Semantic Versioning](https://semver.org/).
   swaps. Nesting a folder into itself is refused; a full folder warns.
 - **System tab monitor chips** for GPU usage, GPU VRAM, GPU wattage, GPU temp,
   **iGPU usage / VRAM / wattage / temp** (AMD integrated GPU on hybrid
-  machines), CPU wattage, CPU temp, RAM usage, and Game process RAM (plus the
-  generic System monitor). Dragging a chip drops a monitor key with that
-  metric pre-selected; set the process name Target for Game process RAM. iGPU
-  keys read the non-NVIDIA DRM card so they stay on the APU when an NVIDIA
-  dGPU is also present.
+  machines), CPU wattage, CPU temp, RAM usage, Game process RAM, and
+  **FPS (MangoHud)** (plus the generic System monitor). Dragging a chip drops a
+  monitor key with that metric pre-selected; set the process name Target for
+  Game process RAM; FPS needs MangoHud CSV logging. iGPU keys read the
+  non-NVIDIA DRM card so they stay on the APU when an NVIDIA dGPU is also
+  present.
 - **Delete** on a key chip's right-click menu. Same wipe as **Clear key** in
   the editor (folder contents still prompt for confirmation). Disabled when
   the key is already empty.

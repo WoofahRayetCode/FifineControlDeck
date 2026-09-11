@@ -202,6 +202,13 @@ class MainWindow(QMainWindow):
         self.tray_act.setChecked(bool(self.config.show_tray))
         self.tray_act.toggled.connect(self._set_show_tray)
         m.addAction(self.tray_act)
+        self.start_minimized_act = QAction("Start minimized", self, checkable=True)
+        self.start_minimized_act.setToolTip(
+            "Open the app minimized to the taskbar. This does not affect "
+            "the hidden start-on-login mode.")
+        self.start_minimized_act.setChecked(bool(self.config.start_minimized))
+        self.start_minimized_act.toggled.connect(self._set_start_minimized)
+        m.addAction(self.start_minimized_act)
         # Glow-on-press toggle
         self.glow_act = QAction("Flash key on press", self, checkable=True)
         self.glow_act.setChecked(bool(self.config.glow))
@@ -711,6 +718,10 @@ class MainWindow(QMainWindow):
                 self.autostart_act.setChecked(os.path.exists(autostart_file()))
             finally:
                 self.autostart_act.blockSignals(False)
+
+    def _set_start_minimized(self, on: bool):
+        self.config.start_minimized = bool(on)
+        self._queue_save()
 
     def apply_autostart(self, enable: bool) -> bool:
         """Force the autostart entry to `enable` and resync the menu item.

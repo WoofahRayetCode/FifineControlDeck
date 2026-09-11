@@ -128,10 +128,10 @@ ACTION_TYPES: dict[str, dict] = {
     "system_power":  {"label": "System power", "params": [
         ("cmd", "choice:sleep,hibernate,shutdown", "Command")]},
     "monitor":       {"label": "System monitor", "params": [
-        ("metric", "choice:cpu,ram,vram,gpu,gputemp,cputemp,igpu,igpuvram,igpupower,igputemp,temp,net,disk,clock,procram,cpupower,gpupower,twitchviewers,twitchuptime,twitchad", "Metric"),
+        ("metric", "choice:cpu,ram,vram,gpu,gputemp,cputemp,igpu,igpuvram,igpupower,igputemp,temp,net,disk,clock,procram,cpupower,gpupower,twitchviewers,twitchuptime,twitchad,fps", "Metric"),
         ("style", "choice:number,gauge,graph", "Style"),
         ("interval", "text", "Refresh every (seconds)"),
-        ("target", "text", "Disk / iface / temp / process / Twitch login"),
+        ("target", "text", "Disk / iface / temp / process / Twitch / MangoHud"),
         ("clock_format", "choice:auto,24h,24h+seconds,12h,12h+seconds", "Clock format"),
         ("clock_date", "choice:auto,iso,us,none", "Clock date"),
     ]},
@@ -235,6 +235,8 @@ _ACTION_CATALOG_CORE = [
          "params": {"metric": "ram"}},
         {"type": "monitor", "label": "Game process RAM",
          "params": {"metric": "procram"}},
+        {"type": "monitor", "label": "FPS (MangoHud)",
+         "params": {"metric": "fps", "style": "number", "interval": "0.5"}},
     ]),
     ("Power", [
         {"type": "system_power", "label": "Sleep",

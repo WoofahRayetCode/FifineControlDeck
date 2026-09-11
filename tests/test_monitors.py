@@ -87,6 +87,8 @@ def test_spec_target_only_applies_to_targeted_metrics():
         {"metric": "twitchviewers", "target": "shroud"}).target == "shroud"
     assert MonitorSpec.from_params(
         {"metric": "twitchuptime", "target": "shroud"}).target == "shroud"
+    assert MonitorSpec.from_params(
+        {"metric": "fps", "target": "/tmp/fifine_mangohud"}).target == "/tmp/fifine_mangohud"
 
 
 def test_failed_samples_leave_history_gaps_not_zeros():
@@ -1866,3 +1868,129 @@ def test_iter_config_secret_ids_includes_twitch():
     from fifine_deck.model import DeckConfig, iter_config_secret_ids
     cfg = DeckConfig(obs_secret_id="obs-1", twitch_secret_id="tw-1")
     assert set(iter_config_secret_ids(cfg)) >= {"obs-1", "tw-1"}
+
+
+# ---------------------------------------------------------------------------
+# MangoHud FPS
+# ---------------------------------------------------------------------------
+_MANGOHUD_HEADER = (
+    "os,cpu,gpu,ram,kernel,driver,cpuscheduler\n"
+    "Linux,CPU,GPU,16G,6.8,radv,CFS\n"
+    "fps,frametime,cpu_load,cpu_power,gpu_load,cpu_temp,gpu_temp,"
+    "gpu_core_clock,gpu_mem_clock,gpu_vram_used,gpu_power,ram_used,"
+    "swap_used,process_rss,cpu_mhz,elapsed\n"
+)
+
+
+def _write_mangohud_csv(path, rows):
+    path.write_text(_MANGOHUD_HEADER + "".join(
+        f"{fps},{ft},10,20,30,40,50,1000,1000,1,100,8,0,1,3000,1\n"
+        for fps, ft in rows
+    ))
+
+
+def test_action_catalog_lists_fps_metric():
+    choice = ACTION_TYPES["monitor"]["params"][0][1]
+    assert "fps" in choice
+    assert "fps" in monitors.METRICS
+
+
+def test_mangohud_parse_helpers():
+    assert monitors._mangohud_game_from_name(
+        "eldenring_2024-01-15_14-30-00.csv") == "eldenring"
+    assert monitors._mangohud_game_from_name(
+        "/tmp/fifine_mangohud/game_2026-09-04_03-00-00.csv") == "game"
+
+
+def test_fps_no_log_is_idle_not_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(monitors, "_mangohud_default_dirs",
+                        lambda: [str(tmp_path / "empty")])
+    r = Sampler().sample(MonitorSpec.from_params({"metric": "fps"}))
+    assert r.ok and r.text == "—"
+    assert "MangoHud" in r.sub
+    assert r.sample is None
+
+
+def test_fps_reads_live_mangohud_csv(tmp_path, monkeypatch):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    csv = log_dir / "cyberpunk_2026-09-04_12-00-00.csv"
+    _write_mangohud_csv(csv, [(60.0, 16.6), (144.2, 6.9)])
+    # Fresh mtime
+    os_utime = __import__("os").utime
+    now = time.time()
+    os_utime(csv, (now, now))
+
+    monkeypatch.setattr(monitors, "_mangohud_default_dirs",
+                        lambda: [str(log_dir)])
+    r = Sampler().sample(MonitorSpec.from_params({"metric": "fps"}))
+    assert r.ok and r.sample == pytest.approx(144.2)
+    assert r.text == "144"
+    assert "6.9 ms" in r.sub
+    assert "cyberpunk" in r.sub
+
+
+def test_fps_target_directory(tmp_path):
+    log_dir = tmp_path / "mh"
+    log_dir.mkdir()
+    csv = log_dir / "game_2026-09-04_12-00-00.csv"
+    _write_mangohud_csv(csv, [(90.0, 11.1)])
+    now = time.time()
+    __import__("os").utime(csv, (now, now))
+    r = Sampler().sample(MonitorSpec.from_params(
+        {"metric": "fps", "target": str(log_dir)}))
+    assert r.ok and r.sample == pytest.approx(90.0)
+    assert r.text == "90"
+
+
+def test_fps_target_file(tmp_path):
+    csv = tmp_path / "custom.csv"
+    _write_mangohud_csv(csv, [(55.5, 18.0)])
+    now = time.time()
+    __import__("os").utime(csv, (now, now))
+    r = Sampler().sample(MonitorSpec.from_params(
+        {"metric": "fps", "target": str(csv)}))
+    assert r.ok and r.sample == pytest.approx(55.5)
+    assert r.text == "56" or r.text == "55.5" or r.text.startswith("55")
+
+
+def test_fps_ignores_stale_and_summary(tmp_path, monkeypatch):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    stale = log_dir / "old_2026-09-01_00-00-00.csv"
+    _write_mangohud_csv(stale, [(200.0, 5.0)])
+    __import__("os").utime(stale, (time.time() - 60, time.time() - 60))
+    summary = log_dir / "old_2026-09-01_00-00-00_summary.csv"
+    summary.write_text("0.1% Min FPS,Average FPS\n10,100\n")
+    monkeypatch.setattr(monitors, "_mangohud_default_dirs",
+                        lambda: [str(log_dir)])
+    r = Sampler().sample(MonitorSpec.from_params({"metric": "fps"}))
+    assert r.ok and r.text == "—"
+    assert r.sample is None
+
+
+def test_fps_game_name_filter(tmp_path, monkeypatch):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    a = log_dir / "alpha_2026-09-04_12-00-00.csv"
+    b = log_dir / "beta_2026-09-04_12-00-01.csv"
+    _write_mangohud_csv(a, [(40.0, 25.0)])
+    _write_mangohud_csv(b, [(120.0, 8.0)])
+    now = time.time()
+    __import__("os").utime(a, (now, now))
+    __import__("os").utime(b, (now, now))
+    monkeypatch.setattr(monitors, "_mangohud_default_dirs",
+                        lambda: [str(log_dir)])
+    r = Sampler().sample(MonitorSpec.from_params(
+        {"metric": "fps", "target": "alpha"}))
+    assert r.ok and r.sample == pytest.approx(40.0)
+    assert "alpha" in r.sub
+
+
+def test_fps_renders_in_every_style():
+    spec_base = {"metric": "fps"}
+    reading = Reading(72.0, "104", "9.6 ms · game", sample=104.0)
+    for style in ("number", "gauge", "graph"):
+        spec = MonitorSpec.from_params({**spec_base, "style": style})
+        img = render_monitor(96, spec, reading, history=[60.0, 90.0, 104.0])
+        assert img.size == (96, 96) and img.mode == "RGB"
