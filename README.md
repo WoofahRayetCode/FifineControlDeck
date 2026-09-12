@@ -101,13 +101,15 @@ expectations:
 - **Twitch clip via Chatterino** — the **Create clip** chip focuses Chatterino
   and runs `/clip` (Twitch clip of the current channel). Keep Chatterino open
   on your stream channel; needs `ydotool`, `wtype`, or `xdotool`.
-- **Minimize to taskbar** (Ctrl+M), **hide to background** (✕ / Ctrl+W — keys
+- **Start minimized** is on by default for new configurations. You can also
+  **minimize to taskbar** (Ctrl+M), **hide to background** (✕ / Ctrl+W — keys
   stay active; Quit is Ctrl+Q), and a **system tray** icon when the desktop
   provides one (Options → Show in system tray; on by default). **Create folder…**
   (Ctrl+Shift+F) turns a key into a named folder of shortcuts (toolbar, Options
   menu, right-click a key, or drop **Open folder** from the catalog).
-- **Play sound / Soundboard** — bundled **MyInstants meme clips** (bruh, vine
-  boom, WTF boom, TikTok India, LoZ item get, …), or any WAV/MP3/OGG on disk.
+- **Play sound / Soundboard** — bundled **MyInstants meme clips** (bruh, Rizz,
+  Emotional Damage, Doom, Metal Gear alert, Shooting Stars, vine boom, WTF
+  boom, TikTok India, LoZ item get, …), or any WAV/MP3/OGG on disk.
   The sidebar **Soundboard** tab has a drag chip per clip (plus random picks)
   and an **All sounds folder** chip that drops a multi-page Memes folder.
   Sounds mix when you mash keys. New installs include a multi-page **Memes**
@@ -298,7 +300,8 @@ are regenerated with `python3 tools/make_icons.py`.
 
 Bundled soundboard clips live in `assets/sounds/` (indexed by
 `assets/sounds/index.json`). Each clip has a fetch/convert helper under
-`tools/make_*.py` (MyInstants → 22050 Hz mono WAV). Third-party sound
+`tools/make_*.py`, including the batch helper for expanded meme sets
+(MyInstants → 22050 Hz mono WAV). Third-party sound
 attribution and takedown notes are in [`NOTICE`](NOTICE).
 
 ## Autostart on login

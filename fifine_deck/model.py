@@ -340,7 +340,7 @@ class DeckConfig:
     snap_hint_dismissed: bool = False   # user ticked "don't show again" on the snap USB hint
     sleep_with_screen: bool = True   # blank the deck when the screen/monitor blanks
     show_tray: bool = True     # tray icon when a StatusNotifier host is present
-    start_minimized: bool = False  # show the normal window minimized on launch
+    start_minimized: bool = True  # show the normal window minimized on launch
     # Main window placement. window_pos_saved gates x/y so a left-of-primary
     # monitor (negative coords) is still restoreable; w/h always apply when set.
     window_pos_saved: bool = False
@@ -492,7 +492,7 @@ class DeckConfig:
             snap_hint_dismissed=bool(d.get("snap_hint_dismissed", False)),
             sleep_with_screen=bool(d.get("sleep_with_screen", True)),
             show_tray=bool(d.get("show_tray", True)),
-            start_minimized=bool(d.get("start_minimized", False)),
+            start_minimized=bool(d.get("start_minimized", True)),
             window_pos_saved=bool(d.get("window_pos_saved", False)),
             window_x=window_x,
             window_y=window_y,

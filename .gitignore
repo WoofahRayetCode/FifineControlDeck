@@ -27,8 +27,9 @@ debian/*.debhelper.log
 *.ddeb
 # Built packages are published to GitHub Releases, not committed.
 dist/
+# Created by `--appimage-extract` while inspecting AppImage contents.
+squashfs-root/
 *.egg-info/
 # local runtime artifacts
 /tmp/
 rotated_*_image_*.jpg
-

@@ -61,6 +61,30 @@ def test_memes_folder_lists_meme_clips_across_pages():
     assert "vine_boom" in found
     assert "multi_yeet" in found
     assert "rizz" in found
+    assert "emotional_damage" in found
+    assert "shocked_sound" in found
+    assert "asian_meme_huh" in found
+    assert "french_meme_song" in found
+    assert "du_bist_gut_genug" in found
+    assert "directed_by_robert_weide" in found
+    assert "okay_lets_go" in found
+    assert "rat_dance_music" in found
+    assert "metal_gear_alert" in found
+    assert "gas_gas_gas" in found
+    assert "wet_fart" in found
+    assert "gegagedigedagedago" in found
+    assert "sad_violin" in found
+    assert "e_meme" in found
+    assert "deja_vu_fade" in found
+    assert "samsung_notification" in found
+    assert "hello_meme" in found
+    assert "ah_shit_here_we_go_again" in found
+    assert "shooting_stars" in found
+    assert "doom_music" in found
+    assert "oblivion_npc_theme" in found
+    assert "meme_67" in found
+    assert "butter_dog" in found
+    assert "arabic_nokia" in found
     assert "bleep" not in found
 
 

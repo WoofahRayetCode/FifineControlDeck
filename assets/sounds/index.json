@@ -39,6 +39,126 @@
     "label": "Rizz sound effect (MyInstants)",
     "category": "Funny"
   },
+  "emotional_damage": {
+    "file": "emotional_damage.wav",
+    "label": "Emotional Damage (MyInstants)",
+    "category": "Funny"
+  },
+  "shocked_sound": {
+    "file": "shocked_sound.wav",
+    "label": "Shocked sound (MyInstants)",
+    "category": "Funny"
+  },
+  "asian_meme_huh": {
+    "file": "asian_meme_huh.wav",
+    "label": "Asian meme huh? (MyInstants)",
+    "category": "Funny"
+  },
+  "french_meme_song": {
+    "file": "french_meme_song.wav",
+    "label": "French meme song (MyInstants)",
+    "category": "Music"
+  },
+  "du_bist_gut_genug": {
+    "file": "du_bist_gut_genug.wav",
+    "label": "Du bist gut genug (MyInstants)",
+    "category": "Funny"
+  },
+  "directed_by_robert_weide": {
+    "file": "directed_by_robert_weide.wav",
+    "label": "Directed by Robert B. Weide (MyInstants)",
+    "category": "Music"
+  },
+  "okay_lets_go": {
+    "file": "okay_lets_go.wav",
+    "label": "Okay, let's go (MyInstants)",
+    "category": "Funny"
+  },
+  "rat_dance_music": {
+    "file": "rat_dance_music.wav",
+    "label": "Rat dance music (MyInstants)",
+    "category": "Music"
+  },
+  "metal_gear_alert": {
+    "file": "metal_gear_alert.wav",
+    "label": "Metal Gear alert (MyInstants)",
+    "category": "Funny"
+  },
+  "gas_gas_gas": {
+    "file": "gas_gas_gas.wav",
+    "label": "Gas Gas Gas (MyInstants)",
+    "category": "Music"
+  },
+  "wet_fart": {
+    "file": "wet_fart.wav",
+    "label": "Wet fart (MyInstants)",
+    "category": "Farts"
+  },
+  "gegagedigedagedago": {
+    "file": "gegagedigedagedago.wav",
+    "label": "Gegagedigedagedago (MyInstants)",
+    "category": "Music"
+  },
+  "sad_violin": {
+    "file": "sad_violin.wav",
+    "label": "Sad violin (MyInstants)",
+    "category": "Music"
+  },
+  "e_meme": {
+    "file": "e_meme.wav",
+    "label": "E meme (MyInstants)",
+    "category": "Funny"
+  },
+  "deja_vu_fade": {
+    "file": "deja_vu_fade.wav",
+    "label": "Déjà Vu Fade (MyInstants)",
+    "category": "Music"
+  },
+  "samsung_notification": {
+    "file": "samsung_notification.wav",
+    "label": "Samsung notification (MyInstants)",
+    "category": "Funny"
+  },
+  "hello_meme": {
+    "file": "hello_meme.wav",
+    "label": "Hello meme (MyInstants)",
+    "category": "Funny"
+  },
+  "ah_shit_here_we_go_again": {
+    "file": "ah_shit_here_we_go_again.wav",
+    "label": "Ah shit, here we go again (MyInstants)",
+    "category": "Funny"
+  },
+  "shooting_stars": {
+    "file": "shooting_stars.wav",
+    "label": "Shooting Stars (MyInstants)",
+    "category": "Music"
+  },
+  "doom_music": {
+    "file": "doom_music.wav",
+    "label": "Doom music (MyInstants)",
+    "category": "Music"
+  },
+  "oblivion_npc_theme": {
+    "file": "oblivion_npc_theme.wav",
+    "label": "Oblivion NPC theme (MyInstants)",
+    "category": "Music"
+  },
+  "meme_67": {
+    "file": "meme_67.wav",
+    "label": "67 meme (MyInstants)",
+    "category": "Funny"
+  },
+  "butter_dog": {
+    "file": "butter_dog.wav",
+    "label": "Butter dog (MyInstants)",
+    "category": "Funny"
+  },
+  "arabic_nokia": {
+    "file": "arabic_nokia.wav",
+    "label": "Arabic Nokia (MyInstants)",
+    "category": "Music"
+  },
   "wrong_answer_buzzer": {
     "file": "wrong_answer_buzzer.wav",
     "label": "Wrong answer buzzer (MyInstants)",
